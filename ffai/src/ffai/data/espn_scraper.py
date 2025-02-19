@@ -188,33 +188,45 @@ class ESPNDraftScraper:
             return None
 
     def load_or_fetch_data(self, year: int, force: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
-        """Load data from files if exists, otherwise fetch from API"""
-        self.set_year(year)
+        """Load data from files if available, otherwise fetch from ESPN"""
 
-        # Update file paths to remove timestamp
-        draft_file = self.raw_data_dir / f"draft_results_{self.league_id}_{year}.csv"
-        stats_file = self.raw_data_dir / f"player_stats_{self.league_id}_{year}.csv"
-        weekly_file = self.raw_data_dir / f"weekly_stats_{self.league_id}_{year}.csv"
-        settings_file = self.raw_data_dir / f"league_settings_{self.league_id}_{year}.json"
-        predraft_file = self.raw_data_dir / f"predraft_values_{self.league_id}_{year}.csv"
+        # Check if all required files exist
+        files_exist = all(
+            (self.raw_data_dir / f).exists() for f in [
+                f"draft_results_{self.league_id}_{year}.csv",
+                f"player_stats_{self.league_id}_{year}.csv",
+                f"weekly_stats_{self.league_id}_{year}.csv",
+                f"league_settings_{self.league_id}_{year}.json",
+                f"predraft_values_{self.league_id}_{year}.csv"
+            ]
+        )
 
-        if all([f.exists() for f in [draft_file, stats_file, weekly_file, settings_file, predraft_file]]) and not force:
+        logger.info(f"Initializing league for year {year}")
+
+        if files_exist and not force:
             logger.info(f"Loading existing data files for league {self.league_id}, year {year}:")
-            logger.debug(f"  Draft data: {draft_file.name}")
-            logger.debug(f"  Stats data: {stats_file.name}")
-            logger.debug(f"  Weekly stats: {weekly_file.name}")
-            logger.debug(f"  League settings: {settings_file.name}")
-            logger.debug(f"  Pre-draft data: {predraft_file.name}")
+            # Load from files without making HTTP requests
+            draft_df = pd.read_csv(self.raw_data_dir / f"draft_results_{self.league_id}_{year}.csv")
+            logger.debug(f"  Draft data: draft_results_{self.league_id}_{year}.csv")
 
-            draft_df = pd.read_csv(draft_file)
-            stats_df = pd.read_csv(stats_file)
-            weekly_df = pd.read_csv(weekly_file)
-            predraft_df = pd.read_csv(predraft_file)
-            with open(settings_file) as f:
+            stats_df = pd.read_csv(self.raw_data_dir / f"player_stats_{self.league_id}_{year}.csv")
+            logger.debug(f"  Stats data: player_stats_{self.league_id}_{year}.csv")
+
+            weekly_df = pd.read_csv(self.raw_data_dir / f"weekly_stats_{self.league_id}_{year}.csv")
+            logger.debug(f"  Weekly stats: weekly_stats_{self.league_id}_{year}.csv")
+
+            with open(self.raw_data_dir / f"league_settings_{self.league_id}_{year}.json", 'r') as f:
                 settings = json.load(f)
+            logger.debug(f"  League settings: league_settings_{self.league_id}_{year}.json")
+
+            predraft_df = pd.read_csv(self.raw_data_dir / f"predraft_values_{self.league_id}_{year}.csv")
+            logger.debug(f"  Pre-draft data: predraft_values_{self.league_id}_{year}.csv")
         else:
-            # Fetch new data
-            logger.info(f"Fetching new data for league {self.league_id}, year {year}")
+            # Only make HTTP requests if we don't have cached data
+            logger.info(f"Fetching data from ESPN for league {self.league_id}, year {year}")
+            self.set_year(year)  # This makes the HTTP requests
+
+            # Fetch and save data
             draft_df = self.get_draft_results()
             stats_df = self.get_player_stats()
             weekly_df = self.get_weekly_stats()

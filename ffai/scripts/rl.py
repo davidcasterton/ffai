@@ -25,15 +25,17 @@ def main():
     # Parse arguments
     args = parser.parse_args()
 
-    # Set up logging
+    # Configure logging based on debug flag
     log_level = logging.DEBUG if args.debug else logging.INFO
-    logger = get_logger(__name__, level=log_level)
+    logging.getLogger().setLevel(log_level)
+
+    logger = get_logger(__name__)
+    logger.info(f"Training for year {args.year}")
 
     # Create checkpoint directory
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Training for year {args.year}")
     logger.info(f"Using checkpoint directory: {checkpoint_dir}")
 
     try:

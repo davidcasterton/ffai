@@ -3,11 +3,11 @@
 import logging
 import colorlog
 
-def get_logger(name, level=logging.INFO):
+def get_logger(name, level=None):
     """Set up a colored logger"""
-    logger = colorlog.getLogger(name)
+    root = colorlog.getLogger()
 
-    if not logger.handlers:  # Only add handler if it doesn't exist
+    if not root.handlers:  # Only add handler if it doesn't exist
         handler = colorlog.StreamHandler()
         handler.setFormatter(
             colorlog.ColoredFormatter(
@@ -21,10 +21,11 @@ def get_logger(name, level=logging.INFO):
                 }
             )
         )
-        logger.addHandler(handler)
-        logger.setLevel(level)
+        root.addHandler(handler)
 
-    if level == logging.DEBUG:
-        logger.setLevel(logging.DEBUG)
+    # Get logger for module
+    logger = logging.getLogger(name)
+    if level is not None:
+        logger.setLevel(level)
 
     return logger
