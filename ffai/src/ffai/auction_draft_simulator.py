@@ -10,15 +10,19 @@ import logging
 
 logger = get_logger(__name__, level=logging.DEBUG)
 
+class InvalidRosterException(Exception):
+    """Exception raised when a team's roster is invalid."""
+    def __init__(self, team_name: str, message: str):
+        self.team_name = team_name
+        self.message = message
+        super().__init__(f"Invalid roster for {team_name}: {message}")
+
 class AuctionDraftSimulator:
     def __init__(self, year, budget=200, rl_team="Team 1", rl_model=None):
         self.year = year
         self.budget = budget
         self.rl_team_name = rl_team
         self.rl_model = rl_model
-
-        logger.info(f"Initializing AuctionDraftSimulator for year {year}")
-        logger.info(f"RL Team: {rl_team}, Budget: ${budget}")
 
         # Set data directory relative to this file
         self.data_dir = Path(__file__).parent / "data/raw"
@@ -66,11 +70,8 @@ class AuctionDraftSimulator:
         )
 
         if len(available_players) < total_spots:
-            print(len(self.predraft_df))
-            import pdb; pdb.set_trace()
             raise ValueError(f"Not enough available players ({len(available_players)}) to fill all roster spots ({total_spots})")
 
-        logger.info(f"Initialized {len(available_players)} valid players for {total_spots} roster spots")
         return available_players
 
     def simulate_draft(self):
@@ -80,7 +81,7 @@ class AuctionDraftSimulator:
 
         while not self.all_rosters_complete():
             round_num += 1
-            if round_num > 300:  # Safety check
+            if round_num > 500:  # Safety check
                 logger.error("Draft exceeded maximum rounds")
                 break
 
@@ -136,18 +137,16 @@ class AuctionDraftSimulator:
                     break
 
             # Add player to winning team's roster
-            logger.debug(f"{current_winner} wins {nominated_player['name']} for ${current_bid}")
+            logger.debug(f"{current_winner} wins {nominated_player['name']} for ${current_bid} ({nominated_player['projected_points']} points)")
             self.add_player_to_roster(current_winner, nominated_player, current_bid)
             # Move to next nominator
             current_nominator_idx = (current_nominator_idx + 1) % len(self.nomination_order)
 
         logger.info("Draft complete")
-
-        # Print rosters
         for team_name, team in self.teams.items():
             logger.debug(f"{team_name} roster: {team['roster']}")
 
-        return self.get_draft_results()
+        return self.teams
 
     def get_min_budget_needed_to_complete_roster(self, team_name: str) -> int:
         """Calculate minimum budget needed to complete roster"""
@@ -155,7 +154,6 @@ class AuctionDraftSimulator:
         for position, slot in self.teams[team_name]["slots"].items():
             if slot["filled"] < slot["required"]:
                 unfilled = slot["required"] - slot["filled"]
-                # logger.debug(f"{team_name} needs {unfilled} more {position}")
                 min_needed += unfilled
         return min_needed
 
@@ -190,6 +188,9 @@ class AuctionDraftSimulator:
         else:
             slots["BE"]["filled"] += 1
 
+        if team == self.rl_team_name:
+            self.check_if_roster_is_valid(team)
+
     def nominate_player(self, team_name: str) -> dict | None:
         """Select a player to nominate for auction"""
         if self.teams[team_name]["roster_completed"]:
@@ -208,6 +209,7 @@ class AuctionDraftSimulator:
                     needs = ["QB", "RB", "WR", "TE"]  # Include all positions for bench
                 else:
                     needs.append(position)
+        needs = list(set(needs))
 
         if not needs:
             logger.debug(f"{team_name} roster is complete, skipping nomination")
@@ -215,16 +217,18 @@ class AuctionDraftSimulator:
             return None
 
         # Get candidates for positional needs
-        candidates = [p for p in self.available_players if p['position'] in needs]
+        candidates = []
+        for position in needs:
+            # Filter players by position and sort by projected points
+            position_players = [p for p in self.available_players if p['position'] == position]
+            position_players.sort(key=lambda x: x['projected_points'], reverse=True)
+            # Take top 2 players from each position
+            candidates.extend(position_players[:3])
 
-        # If no candidates for needs, try all available players
         if not candidates:
             logger.debug(f"{team_name} has no candidates for needs {needs}, trying all available players")
+            import pdb; pdb.set_trace()
             candidates = self.available_players
-
-        # Sort by projected points and take top 10
-        candidates.sort(key=lambda x: x['projected_points'], reverse=True)
-        candidates = candidates[:10]
 
         # Use RL model for RL team, random for others
         if team_name == self.rl_team_name and self.rl_model:
@@ -233,7 +237,7 @@ class AuctionDraftSimulator:
         else:
             player = np.random.choice(candidates)
 
-        logger.debug(f"{team_name} nominates {player['name']} ({player['position']}) - {player['projected_points']} points")
+        # logger.debug(f"{team_name} nominates {player['name']} ({player['position']}) - {player['projected_points']} points")
         return player
 
     def all_rosters_complete(self) -> bool:
@@ -319,6 +323,13 @@ class AuctionDraftSimulator:
         # Calculate number of roster slots per team
         num_roster_slots = 14  # Fixed size based on standard roster slots
 
+        # Get position needs for RL team
+        rl_team = self.teams[self.rl_team_name]
+        position_needs = {
+            pos: slot["required"] - slot["filled"]
+            for pos, slot in rl_team["slots"].items()
+        }
+
         state = {
             'rl_team_budget': self.teams[self.rl_team_name]["current_budget"],
             'opponent_budgets': [self.teams[t]["current_budget"] for t in self.teams if t != self.rl_team_name],
@@ -327,7 +338,32 @@ class AuctionDraftSimulator:
             'predicted_points_per_slot': {
                 team: self.get_points_per_slot(team, num_roster_slots)
                 for team in self.teams
-            }
+            },
+            'position_needs': position_needs  # Add position needs to state
         }
 
         return state
+
+    def check_if_roster_is_valid(self, team_name: str) -> bool:
+        """
+        Check if a team's roster meets all position requirements.
+
+        Args:
+            team_name: Name of the team to validate
+
+        Returns:
+            bool: True if roster meets all requirements, False otherwise
+
+        Raises:
+            InvalidRosterException: If the roster is invalid
+        """
+        team = self.teams[team_name]
+
+        # Check each position slot requirement
+        for position, slot in team["slots"].items():
+            if slot["filled"] > slot["required"]:
+                msg = f"needs {slot['required'] - slot['filled']} more {position}.\nroster: {', '.join([p['name'] + ' (' + p['position'] + ')' + ' ($' + str(p['bid_amount']) + ')' for p in team['roster']])}"
+                logger.debug(f"{team_name} roster invalid: {msg}")
+                raise InvalidRosterException(team_name, msg)
+
+        return True

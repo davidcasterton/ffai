@@ -11,7 +11,7 @@ def main():
     parser = argparse.ArgumentParser(description='Run the RL training for fantasy football.')
     parser.add_argument('-y', '--year', type=int, required=True, help='The year for which to load data')
     parser.add_argument('-e', '--episodes', type=int, default=1000, help='Number of training episodes')
-    parser.add_argument('-c', '--checkpoint-dir', type=str, default='checkpoints/auction_draft',
+    parser.add_argument('-c', '--checkpoint-dir', type=str, default='checkpoints',
                         help='Directory for saving/loading checkpoints')
     parser.add_argument('--checkpoint-frequency', type=int, default=10,
                         help='Save checkpoint every N episodes')
@@ -28,7 +28,6 @@ def main():
     # Set up logging
     log_level = logging.DEBUG if args.debug else logging.INFO
     logger = get_logger(__name__, level=log_level)
-    logger.setLevel(logging.DEBUG)
 
     # Create checkpoint directory
     checkpoint_dir = Path(args.checkpoint_dir)
@@ -45,21 +44,9 @@ def main():
         if args.load_checkpoint and not args.no_load:
             logger.info(f"Loading specified checkpoint: {args.load_checkpoint}")
             model.load_checkpoint(args.load_checkpoint)
-
-        # Initialize simulators
-        auction_simulator = AuctionDraftSimulator(year=args.year, rl_model=model)
-
-        # Get initial draft results
-        initial_draft_results = auction_simulator.simulate_draft()
-
-        # Initialize season simulator with valid draft results
-        season_simulator = SeasonSimulator(draft_results=initial_draft_results, year=args.year)
-
         # Train model
         train_rl_model(
             model=model,
-            draft_simulator=auction_simulator,
-            season_simulator=season_simulator,
             num_episodes=args.episodes,
             checkpoint_frequency=args.checkpoint_frequency
         )
