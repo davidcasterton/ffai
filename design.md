@@ -48,17 +48,31 @@ This project aims to develop a **fantasy football auction draft and season simul
   - Prediction of each players value in the draft
 - **Budget constraints**: Each team has \$200.
 
+**Setup:**
+
+- 11 team managers will bid using ESPN's auto-draft logic.&#x20;
+  - I believe this logic bids up to ESPN's default predicted value of each player, provided the team's budget allows. Please make this logic as close as possible to how auto-draft works in ESPN auction drafts.
+- The 12th team will run the RL model being trained to optimize its auction strategy to maximize the number of weeks it wins in the season simulator.
+  - Through iterations of running the auction and season simulator, this RL model should learn how to improve it's auction drafting  to maximize the number of weeks it wins during the season simulator.
+
 **Logic:**
 
-- **Auction Managers:**
-  - 11 team managers will bid using ESPN's auto-draft logic.&#x20;
-    - I believe this logic bids up to ESPN's default predicted value of each player, provided the team's budget allows. Please make this logic as close as possible to how auto-draft works in ESPN auction drafts.
-  - The 12th team will run the RL model being trained to optimize its auction strategy to maximize the number of weeks it wins in the season simulator.
-    - Through iterations of running the auction and season simulator, this RL model should learn how to improve it's auction drafting  to maximize the number of weeks it wins during the season simulator.
-- **Player Nomination:** Each team nominates a player in order.&#x20;
-- **Player Bids:** All teams bid on the player nominated until 11 teams decide to stop bidding at the max value they will pay for that player. The team with the highest bid for that player adds them to their roster.
-- **Roster completion:** All teams are required to complete exactly a full roster. They cannot have more or less players than the defined roster slots.
-- **Auction Budget:** All teams have a budget of \$200. They cannot spend more than their budget. They can spend less, but the manager's intent is to use their budget to maximize the quality of players on their roster.
+- For our auction draft simulator, we will have 11 teams using the ESPN auto-draft logic, and 1 team training an RL model to optimize it's auction strategy.
+- The RL model's goal is to learn how to draft the team within it's budget that will win the most weeks in the season simulator.
+- The high level logic of the auction draft is as follows:
+  - The auction rotates which team is nominating a player in order.
+  - When a team nominates a player, they place a bid of $1 for that player.
+  - Each team decides the max value they will bid for the nominated player.
+    - Each auto-draft team decides the max value they are willing to pay for a player by using the predicted value of the player +/- a random 10% of that value, rounded to the nearest $1.
+    - The RL team will use its model to decide the max value for the nominated player.
+  - Each team gets to decide if they want to bid $1 more than the previous team.
+  - Bidding for a player stops when 11 teams decide to stop bidding for that player.
+  - The team with the highest bid for that player adds them to their roster.
+  - The auction then rotates to the next team and the process repeats.
+  - The auction ends when all 12 teams have completed their rosters.
+  - If the RL model cannot complete a full roster within it's budget, then the season simulator should stop and the model should be updated to try to improve it's strategy.
+  - All teams are required to complete exactly a full roster. They cannot have more or less players than the defined roster slots.
+  - Teams cannot exceed their budget of $200.
 
 #### **Outputs:**
 
@@ -110,6 +124,7 @@ This project aims to develop a **fantasy football auction draft and season simul
   - 1st place in season standings = +10
   - 2nd place in season standings = +5
   - 3rd or 4th in season standings = +2
+  - Cannot complete a roster within budget = -10
 
 #### **Training Process:**
 

@@ -3,10 +3,8 @@ from pathlib import Path
 from ffai.auction_draft_simulator import AuctionDraftSimulator
 from ffai.season_simulator import SeasonSimulator
 from ffai.rl_model import RLModel, train_rl_model
-from ffai import setup_logger
+from ffai import get_logger
 import logging
-
-logger = setup_logger(__name__)
 
 def main():
     # Set up argument parser
@@ -20,7 +18,7 @@ def main():
     parser.add_argument('--load-checkpoint', type=str,
                         help='Path to specific checkpoint to load')
     parser.add_argument('--no-load', action='store_true',
-                        help='Start fresh without loading latest checkpoint')
+                        help='Do not load existing checkpoint')
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug logging')
 
@@ -29,7 +27,8 @@ def main():
 
     # Set up logging
     log_level = logging.DEBUG if args.debug else logging.INFO
-    logger = setup_logger(__name__, level=log_level)
+    logger = get_logger(__name__, level=log_level)
+    logger.setLevel(logging.DEBUG)
 
     # Create checkpoint directory
     checkpoint_dir = Path(args.checkpoint_dir)
@@ -42,21 +41,16 @@ def main():
         # Initialize model
         model = RLModel(checkpoint_dir=checkpoint_dir)
 
-        # Load checkpoint if requested
-        if not args.no_load:
-            if args.load_checkpoint:
-                logger.info(f"Loading specified checkpoint: {args.load_checkpoint}")
-                model.load_checkpoint(Path(args.load_checkpoint))
-            else:
-                logger.info("Attempting to load latest checkpoint...")
-                model.load_checkpoint()
+        # Load specific checkpoint if requested
+        if args.load_checkpoint and not args.no_load:
+            logger.info(f"Loading specified checkpoint: {args.load_checkpoint}")
+            model.load_checkpoint(args.load_checkpoint)
 
-        # Initialize simulators with model
+        # Initialize simulators
         auction_simulator = AuctionDraftSimulator(year=args.year, rl_model=model)
 
-        # Run initial draft to get valid draft results
-        auction_simulator.simulate_draft()
-        initial_draft_results = auction_simulator.get_draft_results()
+        # Get initial draft results
+        initial_draft_results = auction_simulator.simulate_draft()
 
         # Initialize season simulator with valid draft results
         season_simulator = SeasonSimulator(draft_results=initial_draft_results, year=args.year)

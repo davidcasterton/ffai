@@ -8,14 +8,14 @@ from espn_api.football import League
 from espn_api.requests.espn_requests import ESPNInvalidLeague
 import argparse
 import json
-from ffai import setup_logger
+from ffai import get_logger
 
 # ESPN API Authentication
 SWID = '{8DF64DA2-44CD-4383-87DA-FF2FECDFB6FD}'
 ESPN_S2 = 'AEAxi0mL0zKA5Ck7gIl45WaDTC332wzUITx%2FewTe%2BckX3hpNwWVnUgrMstNR8l1tJVjb86s97U6E3JhHpEihdyrm5lIHR%2FnrdPiV%2BK%2F%2Bl2X0M8owhfjMMxLJ7WvjsbSBF6cH0oomwVvQUkZLWwXZ%2BiXu%2BYf8he8WX1JkZUdAQiKnejOld19RM87ZHiYDjoXGnu0yxEsWvfpqoAL8vxgWh%2B5YukiTZ1J5FeQo8PadRezprPktrVGN0hHYxE1Yd87yGtXpjZa4zczMm8JrAK7KGAjZ9xr%2B1RGtZcvVAAawVMN8kjfEglR50%2BDWUSIEpBlvCbcGwv7I6qtPdDAqLoNkX5ko'
 LEAGUE_ID = "770280"
 
-logger = setup_logger(__name__)
+logger = get_logger(__name__)
 
 class ESPNDraftScraper:
     def __init__(self, league_id: str = LEAGUE_ID, year: int = None):
@@ -219,15 +219,7 @@ class ESPNDraftScraper:
             stats_df = self.get_player_stats()
             weekly_df = self.get_weekly_stats()
             settings = self.get_league_settings()
-
-            # Try to get predraft data, create empty DataFrame if fails
             predraft_df = self.get_predraft_player_data()
-            if predraft_df is None:
-                logger.warning(f"Could not fetch pre-draft data for {year}, using empty DataFrame")
-                predraft_df = pd.DataFrame(columns=[
-                    'player_id', 'name', 'position', 'projected_points',
-                    'auction_value', 'adp', 'team', 'status'
-                ])
 
             # Add year to player stats
             stats_df['year'] = year

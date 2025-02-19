@@ -2,6 +2,9 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import json
+from ffai import get_logger
+
+logger = get_logger(__name__)
 
 class SeasonSimulator:
     def __init__(self, draft_results, year):
@@ -37,15 +40,19 @@ class SeasonSimulator:
 
     def generate_season_schedule(self):
         """Generate a 17-week schedule where each team plays others fairly"""
-        teams = list(self.draft_results.keys())
+        teams = list(self.draft_results["teams"].keys())
         schedule = {}
+
+        # Ensure even number of teams
+        if len(teams) % 2 != 0:
+            raise ValueError(f"Need even number of teams, got {len(teams)}")
 
         # Round-robin scheduling algorithm
         for week in range(1, 18):
             matchups = []
             # Pair teams for this week
             for i in range(0, len(teams), 2):
-                matchups.append((teams[i], teams[i+1]))
+                matchups.append((teams[i], teams[(i+1) % len(teams)]))
             schedule[week] = matchups
 
             # Rotate teams for next week (keeping first team fixed)

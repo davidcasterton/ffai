@@ -3,7 +3,7 @@
 import logging
 import colorlog
 
-def setup_logger(name, level=logging.INFO):
+def get_logger(name, level=logging.INFO):
     """Set up a colored logger"""
     logger = colorlog.getLogger(name)
 
@@ -23,5 +23,8 @@ def setup_logger(name, level=logging.INFO):
         )
         logger.addHandler(handler)
         logger.setLevel(level)
+
+    if level == logging.DEBUG:
+        logger.setLevel(logging.DEBUG)
 
     return logger
