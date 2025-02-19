@@ -289,6 +289,7 @@ def train_rl_model(model, num_episodes=1000, checkpoint_frequency=10):
         season_simulator.simulate_season()
         standings = season_simulator.get_standings()
         weekly_results = season_simulator.get_weekly_results()
+        season_simulator.log_season_results()
 
         # Calculate rewards
         season_reward = calculate_reward(draft_results, standings, weekly_results, draft_simulator.rl_team_name)

@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 from ffai import get_logger
 from ffai.data.espn_scraper import ESPNDraftScraper
+import copy
 logger = get_logger(__name__)
 
 class SeasonSimulator:
@@ -17,7 +18,8 @@ class SeasonSimulator:
         scraper = ESPNDraftScraper()
         self.draft_df, self.stats_df, self.weekly_df, self.predraft_df, self.settings = scraper.load_or_fetch_data(self.year)
 
-        self.standings = {team: 0 for team in draft_results.keys()}
+        # Initialize standings for each team
+        self.standings = {team_name: 0 for team_name in self.draft_results.keys()}
         self.schedule = self.generate_season_schedule()
         self.weekly_results = {}
 
@@ -76,75 +78,90 @@ class SeasonSimulator:
                 'winner': winner
             })
 
-    def optimize_weekly_roster(self, team, week):
-        """Set optimal lineup based on projected points"""
-        roster = self.draft_results[team]['roster']
-        optimized_roster = {
-            pos: [] for pos in self.settings["position_slot_counts"].keys()
-        }
+    def optimize_weekly_roster(self, team_name: str, week: int) -> dict:
+        """Optimize weekly roster based on projected points for the given week"""
+        # Create copy of roster to modify
+        roster = copy.deepcopy(self.draft_results[team_name]["roster"])
 
-        # Get projected points for each player
-        players_with_projections = []
-        for player in roster:
-            # Try to get stats from weekly_df
-            stats_mask = (
-                (self.weekly_df['week'] == week) &
-                (self.weekly_df['player_id'] == player['player_id'])
-            )
-            player_stats = self.weekly_df[stats_mask]
+        # Get weekly projections for each player
+        for slot, player in roster.items():
+            if player is not None:
+                player_stats = self.weekly_df[
+                    (self.weekly_df['week'] == week) &
+                    (self.weekly_df['player_id'] == player['player_id'])
+                ]
+                if not player_stats.empty:
+                    player['projected_points'] = player_stats['projected_points'].iloc[0]
+                else:
+                    player['projected_points'] = 0
 
-            if not player_stats.empty:
-                projected = player_stats['projected_points'].iloc[0]
+        # Sort players by projected points for this week
+        available_players = [p for p in roster.values() if p is not None]
+        available_players.sort(key=lambda x: x.get('projected_points', 0), reverse=True)
+
+        # Clear roster slots while preserving structure
+        original_slots = roster.keys()
+        roster = {slot: None for slot in original_slots}
+
+        # Track used player IDs to avoid duplicates
+        used_player_ids = set()
+
+        # Fill required positions first
+        for pos in ['QB', 'RB', 'WR', 'TE', 'D/ST']:
+            pos_players = [p for p in available_players
+                          if p['position'] == pos and p['player_id'] not in used_player_ids]
+            if pos == 'RB' or pos == 'WR':
+                # Fill RB1/RB2 or WR1/WR2
+                for i, slot in enumerate([f'{pos} 1', f'{pos} 2']):
+                    if i < len(pos_players) and slot in roster:
+                        roster[slot] = pos_players[i]
+                        used_player_ids.add(pos_players[i]['player_id'])
             else:
-                projected = 0
+                # Fill single position slots
+                if pos_players and pos in roster:
+                    roster[pos] = pos_players[0]
+                    used_player_ids.add(pos_players[0]['player_id'])
 
-            players_with_projections.append({
-                **player,
-                'projected_points': projected
-            })
+        # Fill FLEX with best remaining unused RB/WR/TE
+        unused_flex_players = [
+            p for p in available_players
+            if p['position'] in ['RB', 'WR', 'TE']
+            and p['player_id'] not in used_player_ids
+        ]
+        if unused_flex_players and 'FLEX' in roster:
+            roster['FLEX'] = unused_flex_players[0]
+            used_player_ids.add(unused_flex_players[0]['player_id'])
 
-        # Sort by projected points
-        players_with_projections.sort(key=lambda x: x['projected_points'], reverse=True)
+        # Fill bench with remaining unused players
+        unused_players = [p for p in available_players
+                         if p['player_id'] not in used_player_ids]
+        bench_slots = [slot for slot in roster.keys() if 'BENCH' in slot]
+        for slot, player in zip(bench_slots, unused_players):
+            roster[slot] = player
+            used_player_ids.add(player['player_id'])
 
-        # Fill primary positions first
-        remaining_players = []
-        for player in players_with_projections:
-            position = player['position']
-            if position in optimized_roster and len(optimized_roster[position]) < self.settings["position_slot_counts"][position]:
-                optimized_roster[position].append(player)
-            else:
-                remaining_players.append(player)
+        # logger.info(f"Weekly roster for {team_name} week {week}: {roster}")
 
-        # Fill FLEX with best remaining RB/WR/TE
-        flex_eligible = [p for p in remaining_players if p['position'] in ['RB', 'WR', 'TE']]
-        if flex_eligible and len(optimized_roster['RB/WR/TE']) < self.settings["position_slot_counts"]['RB/WR/TE']:
-            best_flex = max(flex_eligible, key=lambda x: x['projected_points'])
-            optimized_roster['RB/WR/TE'].append(best_flex)
-            remaining_players.remove(best_flex)
+        return roster
 
-        # Put remaining players on bench
-        optimized_roster['BE'].extend(remaining_players)
-
-        return optimized_roster
-
-    def calculate_score(self, roster, week):
+    def calculate_score(self, roster: dict, week: int) -> float:
         """Calculate actual score for a team's optimized roster"""
         score = 0
-        for position, players in roster.items():
-            if position not in ['BE', 'IR']:  # Don't count bench or IR players
-                for player in players:
-                    # Try to get stats from weekly_df
-                    stats_mask = (
-                        (self.weekly_df['week'] == week) &
-                        (self.weekly_df['player_id'] == player['player_id'])
-                    )
-                    player_stats = self.weekly_df[stats_mask]
+        for slot, player in roster.items():
+            # Skip bench and empty slots
+            if player is not None and not 'BENCH' in slot:
+                # Try to get stats from weekly_df
+                stats_mask = (
+                    (self.weekly_df['week'] == week) &
+                    (self.weekly_df['player_id'] == player['player_id'])
+                )
+                player_stats = self.weekly_df[stats_mask]
 
-                    if not player_stats.empty:
-                        score += player_stats['points'].iloc[0]
-                    else:
-                        # player did not score points this week
-                        score += 0
+                if not player_stats.empty:
+                    score += player_stats['points'].iloc[0]
+                else:
+                    # player did not score points this week
+                    score += 0
 
         return round(score, 2)
 
@@ -162,10 +179,61 @@ class SeasonSimulator:
         losses = 17 - wins  # 17-week season
         return {'wins': wins, 'losses': losses}
 
+    def log_season_results(self, rl_team_name: str = "Team 1"):
+        """Log season results for RL team in human readable format"""
+        logger.info(f"\nSeason Results for {rl_team_name}:")
+        logger.info("-" * 50)
+
+        total_wins = 0
+        total_points_for = 0
+        total_points_against = 0
+
+        for week, matchups in self.weekly_results.items():
+            # Find RL team's matchup
+            rl_matchup = next(
+                matchup for matchup in matchups
+                if rl_team_name in (matchup['team1'], matchup['team2'])
+            )
+
+            # Determine if RL team was team1 or team2
+            if rl_matchup['team1'] == rl_team_name:
+                rl_score = rl_matchup['team1_score']
+                opp_name = rl_matchup['team2']
+                opp_score = rl_matchup['team2_score']
+            else:
+                rl_score = rl_matchup['team2_score']
+                opp_name = rl_matchup['team1']
+                opp_score = rl_matchup['team1_score']
+
+            # Track totals
+            total_points_for += rl_score
+            total_points_against += opp_score
+            if rl_matchup['winner'] == rl_team_name:
+                total_wins += 1
+                result = "WIN"
+            else:
+                result = "LOSS"
+
+            # Log weekly result
+            logger.info(
+                f"Week {week:2d}: {result:4s} vs {opp_name:8s} "
+                f"| {rl_score:5.1f} - {opp_score:5.1f}"
+            )
+
+        # Log season summary
+        logger.info("-" * 50)
+        logger.info(
+            f"Season Total: {total_wins:2d}-{17-total_wins:2d} "
+            f"| Points For: {total_points_for:6.1f} "
+            f"| Points Against: {total_points_against:6.1f}"
+        )
+        logger.info("-" * 50)
+
 if __name__ == "__main__":
     # Load draft results and weekly stats
     draft_results = {}  # Load from auction draft simulator
     simulator = SeasonSimulator(draft_results, 2024)
     simulator.simulate_season()
+    simulator.log_RL_weekly_results()
     standings = simulator.get_standings()
     print(standings)

@@ -38,6 +38,9 @@ class AuctionDraftSimulator:
         self.available_players: list[dict] = self.initialize_available_players()
         self.players_drafted: list[dict] = []
 
+        # self.num_rl_players = 0
+        # self.last_num_rl_players_debugged = 0
+
     def initialize_teams(self):
         """Initialize teams with mandatory slot budget reserves"""
         teams: dict[str, dict] = {}
@@ -53,7 +56,7 @@ class AuctionDraftSimulator:
                 "WR 2": None,
                 "TE": None,
                 "FLEX": None,  # RB/WR/TE
-                "DEF": None,
+                "D/ST": None,  # Changed from "DEF" to "D/ST"
             }
 
             # Only some years have K slots
@@ -69,7 +72,7 @@ class AuctionDraftSimulator:
                 "current_budget": copy.deepcopy(self.budget),
                 "roster": roster_slots,
                 "roster_completed": False,
-                "slots": {
+                "position_counts": {
                     pos: {"required": count, "filled": 0}
                     for pos, count in self.settings["position_slot_counts"].items()
                 }
@@ -87,7 +90,7 @@ class AuctionDraftSimulator:
 
         # Calculate total roster spots needed
         total_spots = sum(
-            sum(slot["required"] for slot in team["slots"].values())
+            sum(position_count["required"] for position_count in team["position_counts"].values())
             for team in self.teams.values()
         )
 
@@ -106,10 +109,17 @@ class AuctionDraftSimulator:
             round_num += 1
             if round_num > 500:  # Safety check
                 logger.error("Draft exceeded maximum rounds")
+                for team_name in self.teams.keys():
+                    logger.warning(f"{team_name} roster: {self.get_team_roster_overview_by_slot(team_name)}")
+                import pdb; pdb.set_trace()
                 break
 
             # Get nominating team and their nomination
             nominating_team_name: str = self.nomination_order[current_nominator_idx]
+            if self.teams[nominating_team_name]["roster_completed"]:
+                logger.debug(f"{nominating_team_name} roster is complete, skipping nomination")
+                current_nominator_idx = (current_nominator_idx + 1) % len(self.nomination_order)
+                continue
 
             try:
 
@@ -178,46 +188,38 @@ class AuctionDraftSimulator:
                 # If RL team won the player, calculate reward
                 if current_winner == self.rl_team_name and self.rl_model:
                     reward = 0
+                    pos = nominated_player['position']
+                    needed_positions = self.get_positions_needed(self.rl_team_name)
+                    position_counts = self.teams[self.rl_team_name]["position_counts"]
 
-                    # Get roster state
-                    team_slots = self.teams[self.rl_team_name]["slots"]
-                    roster = self.teams[self.rl_team_name]["roster"]
+                    # Big reward for first player at each required position
+                    if pos in needed_positions:
+                        if position_counts[pos]["filled"] == 0:
+                            reward += 30  # Huge reward for first player at position
+                        elif position_counts[pos]["filled"] < position_counts[pos]["required"]:
+                            reward += 20  # Big reward for filling required slots
+                        else:
+                            reward += 5   # Small reward for depth
 
-                    # Count positions by type
-                    position_counts = {}
-                    for slot, player in roster.items():
-                        if player is not None:
-                            pos = player["position"]
-                            position_counts[pos] = position_counts.get(pos, 0) + 1
+                    # Harsh penalties for bad roster construction
+                    if needed_positions:  # If we still have needs
+                        # Penalty for taking non-needed positions
+                        if pos not in needed_positions:
+                            reward -= 25
 
-                    # Big reward for filling required slots
-                    has_unfilled_required = any(
-                        slot["filled"] < slot["required"]
-                        for pos, slot in team_slots.items()
-                        if pos != "BE"
-                    )
-                    if has_unfilled_required and nominated_player['position'] in self.get_positions_needed(self.rl_team_name):
-                        reward += 5
+                        # Extra penalty for position hoarding
+                        if position_counts[pos]["filled"] > position_counts[pos]["required"]:
+                            reward -= position_counts[pos]["filled"] * 15  # Exponential penalty
 
-                    # Smaller reward for good value
-                    if nominated_player.get('auction_value', 0) > current_bid:
-                        reward += 1
+                        # Extreme penalty for hoarding D/ST
+                        if pos == "D/ST" and position_counts[pos]["filled"] >= 2:
+                            reward -= 50
 
-                    # Penalties for position hoarding
-                    for pos, count in position_counts.items():
-                        if pos == "QB" and count > 2:
-                            reward -= (count - 2) * 3  # -3 for each QB over 2
-                        elif pos == "TE" and count > 2:
-                            reward -= (count - 2) * 3  # -3 for each TE over 2
-                        elif pos == "D/ST" and count > 2:
-                            reward -= (count - 2) * 3  # -3 for each DEF over 2
-
-                    # Extra penalty for hoarding while missing starters
-                    if has_unfilled_required:
-                        needed_positions = self.get_positions_needed(self.rl_team_name)
-                        for pos, count in position_counts.items():
-                            if pos not in needed_positions and count > 2:
-                                reward -= count * 2  # Bigger penalty for hoarding unneeded positions
+                    # Budget management penalties
+                    remaining_budget = self.teams[self.rl_team_name]["current_budget"] - current_bid
+                    min_needed = self.get_min_budget_needed_to_complete_roster(self.rl_team_name)
+                    if remaining_budget < min_needed:
+                        reward -= 40  # Big penalty for not leaving enough budget
 
                     total_reward += reward
                     self.rl_model.update(reward)
@@ -226,6 +228,7 @@ class AuctionDraftSimulator:
                 # Immediate negative feedback for invalid roster moves
                 if self.rl_model:
                     reward = -5
+                    logger.debug(f"Invalid roster move: {e}, -5 reward")
                     total_reward += reward
                     self.rl_model.update(reward)
                 logger.warning(f"Invalid roster move: {e}")
@@ -240,16 +243,16 @@ class AuctionDraftSimulator:
     def get_min_budget_needed_to_complete_roster(self, team_name: str) -> int:
         """Calculate minimum budget needed to complete roster"""
         min_needed = 0
-        for position, slot in self.teams[team_name]["slots"].items():
-            if slot["filled"] < slot["required"]:
-                unfilled = slot["required"] - slot["filled"]
+        for position, position_count in self.teams[team_name]["position_counts"].items():
+            if position_count["filled"] < position_count["required"]:
+                unfilled = position_count["required"] - position_count["filled"]
                 min_needed += unfilled
         return min_needed
 
-    def add_player_to_roster(self, team, player, bid_amount):
-        """Add player to roster with budget management"""
+    def add_player_to_roster(self, team_name: str, player: dict, bid_amount: int) -> None:
+        """Add player to team's roster"""
         # update budget
-        self.teams[team]["current_budget"] -= bid_amount
+        self.teams[team_name]["current_budget"] -= bid_amount
 
         player_data = {
             "player_id": player["player_id"],
@@ -261,8 +264,18 @@ class AuctionDraftSimulator:
 
         # Find appropriate slot for player
         position = player["position"]
-        roster = self.teams[team]["roster"]
-        slots = self.teams[team]["slots"]
+        roster = self.teams[team_name]["roster"]
+        position_counts = self.teams[team_name]["position_counts"]
+
+        # Add debug logging for RL team acquisitions
+        # if team_name == self.rl_team_name:
+        #     logger.debug(f"\nRL Team adding {player['name']} ({player['position']}) for ${bid_amount}")
+        #     logger.debug("Current roster before add:")
+        #     logger.debug(self.get_team_roster_overview_by_slot(team_name))
+
+        #     # Log reward calculation details
+        #     needed_positions = self.get_positions_needed(team_name)
+        #     logger.debug(f"Needed positions before add: {needed_positions}")
 
         def find_empty_bench_slot():
             """Helper function to find first empty bench slot"""
@@ -272,99 +285,108 @@ class AuctionDraftSimulator:
                 bench_key = f"BENCH {i+1}"
                 if bench_key in roster and roster[bench_key] is None:
                     return bench_key
-            raise InvalidRosterException(team, f"{team} has no empty bench slots for {player['name']} ({position}).\n{self.get_team_roster_overview_by_slot(team)}")
+            raise InvalidRosterException(team_name, f"{team_name} has no empty bench slots for {player['name']} ({position}).\n{self.get_team_roster_overview_by_slot(team_name)}")
 
         # Try to fill primary position first
         if position == "QB":
             if roster["QB"] is None:
                 roster["QB"] = player_data
-                slots["QB"]["filled"] += 1
+                position_counts["QB"]["filled"] += 1
             else:
                 bench_slot = find_empty_bench_slot()
                 if bench_slot:
                     roster[bench_slot] = player_data
-                    slots["BE"]["filled"] += 1
+                    position_counts["BE"]["filled"] += 1
 
         elif position == "K":
             if roster["K"] is None:
                 roster["K"] = player_data
-                slots["K"]["filled"] += 1
+                position_counts["K"]["filled"] += 1
             else:
                 bench_slot = find_empty_bench_slot()
                 if bench_slot:
                     roster[bench_slot] = player_data
-                    slots["BE"]["filled"] += 1
+                    position_counts["BE"]["filled"] += 1
 
-        elif position == "DEF":
-            if roster["DEF"] is None:
-                roster["DEF"] = player_data
-                slots["DEF"]["filled"] += 1
+        elif position == "D/ST":
+            if roster["D/ST"] is None:
+                roster["D/ST"] = player_data
+                position_counts["D/ST"]["filled"] += 1
             else:
                 bench_slot = find_empty_bench_slot()
                 if bench_slot:
                     roster[bench_slot] = player_data
-                    slots["BE"]["filled"] += 1
+                    position_counts["BE"]["filled"] += 1
 
         elif position == "RB":
             if roster["RB 1"] is None:
                 roster["RB 1"] = player_data
-                slots["RB"]["filled"] += 1
+                position_counts["RB"]["filled"] += 1
             elif roster["RB 2"] is None:
                 roster["RB 2"] = player_data
-                slots["RB"]["filled"] += 1
-            elif roster["FLEX"] is None and slots["RB/WR/TE"]["filled"] < slots["RB/WR/TE"]["required"]:
+                position_counts["RB"]["filled"] += 1
+            elif roster["FLEX"] is None and position_counts["RB/WR/TE"]["filled"] < position_counts["RB/WR/TE"]["required"]:
                 roster["FLEX"] = player_data
-                slots["RB/WR/TE"]["filled"] += 1
+                position_counts["RB/WR/TE"]["filled"] += 1
             else:
                 bench_slot = find_empty_bench_slot()
                 if bench_slot:
                     roster[bench_slot] = player_data
-                    slots["BE"]["filled"] += 1
+                    position_counts["BE"]["filled"] += 1
 
         elif position == "WR":
             if roster["WR 1"] is None:
                 roster["WR 1"] = player_data
-                slots["WR"]["filled"] += 1
+                position_counts["WR"]["filled"] += 1
             elif roster["WR 2"] is None:
                 roster["WR 2"] = player_data
-                slots["WR"]["filled"] += 1
-            elif roster["FLEX"] is None and slots["RB/WR/TE"]["filled"] < slots["RB/WR/TE"]["required"]:
+                position_counts["WR"]["filled"] += 1
+            elif roster["FLEX"] is None and position_counts["RB/WR/TE"]["filled"] < position_counts["RB/WR/TE"]["required"]:
                 roster["FLEX"] = player_data
-                slots["RB/WR/TE"]["filled"] += 1
+                position_counts["RB/WR/TE"]["filled"] += 1
             else:
                 bench_slot = find_empty_bench_slot()
                 if bench_slot:
                     roster[bench_slot] = player_data
-                    slots["BE"]["filled"] += 1
+                    position_counts["BE"]["filled"] += 1
 
         elif position == "TE":
             if roster["TE"] is None:
                 roster["TE"] = player_data
-                slots["TE"]["filled"] += 1
-            elif roster["FLEX"] is None and slots["RB/WR/TE"]["filled"] < slots["RB/WR/TE"]["required"]:
+                position_counts["TE"]["filled"] += 1
+            elif roster["FLEX"] is None and position_counts["RB/WR/TE"]["filled"] < position_counts["RB/WR/TE"]["required"]:
                 roster["FLEX"] = player_data
-                slots["RB/WR/TE"]["filled"] += 1
+                position_counts["RB/WR/TE"]["filled"] += 1
             else:
                 bench_slot = find_empty_bench_slot()
                 if bench_slot:
                     roster[bench_slot] = player_data
-                    slots["BE"]["filled"] += 1
+                    position_counts["BE"]["filled"] += 1
 
         # Remove player from available players
         self.available_players.remove(player)
 
-        if team == self.rl_team_name:
-            self.check_if_roster_is_valid(team)
+        if team_name == self.rl_team_name:
+            self.check_if_roster_is_valid(team_name)
+
+            # Add more debug logging after successful add
+            # logger.debug("\nRoster after add:")
+            # logger.debug(self.get_team_roster_overview_by_slot(team_name))
+
+            # self.num_rl_players += 1
 
     def should_bid(self, team, player, current_bid):
         """Determine if team should bid on player"""
-        # Check if team has required slots to fill
-        team_slots = self.teams[team]["slots"]
-        has_unfilled_required = any(
-            slot["filled"] < slot["required"]
-            for pos, slot in team_slots.items()
-            if pos != "BE"
-        )
+        # First check if roster is already marked as complete
+        if self.teams[team]["roster_completed"]:
+            return False
+
+        # Check if we need any more positions
+        needed_positions = self.get_positions_needed(team)
+        if not needed_positions:
+            # Mark roster as complete if we don't need any positions
+            self.teams[team]["roster_completed"] = True
+            return False
 
         # Count how many defenses and kickers this team already has
         def_count = sum(
@@ -381,10 +403,8 @@ class AuctionDraftSimulator:
             return False
 
         # If team has unfilled required slots, only bid on players for those positions
-        if has_unfilled_required:
-            needed_positions = self.get_positions_needed(team)
-            if player["position"] not in needed_positions:
-                return False
+        if needed_positions and player["position"] not in needed_positions:
+            return False
 
         # ESPN auto-draft logic for budget
         max_bid = min(
@@ -398,13 +418,13 @@ class AuctionDraftSimulator:
     def nominate_player(self, team_name: str) -> dict | None:
         """Select a player to nominate for auction"""
         if self.teams[team_name]["roster_completed"]:
-            logger.debug(f"{team_name} roster is complete, skipping nomination")
+            # logger.debug(f"{team_name} roster is complete, skipping nomination")
             return None
 
         positions_needed = self.get_positions_needed(team_name)
 
         if not positions_needed:
-            logger.debug(f"{team_name} roster is complete, skipping nomination")
+            # logger.debug(f"{team_name} roster is complete, skipping nomination")
             self.teams[team_name]["roster_completed"] = True
             return None
 
@@ -431,13 +451,11 @@ class AuctionDraftSimulator:
 
     def all_rosters_complete(self) -> bool:
         """Check if all teams have completed their rosters"""
-        for team_name, team in self.teams.items():
-            # Check each position slot
-            for position, slot in team["slots"].items():
-                if slot["filled"] < slot["required"]:
-                    # logger.debug(f"{team_name} needs {slot['required'] - slot['filled']} more {position}")
-                    return False
+        for team_name in self.teams.keys():
+            if not self.teams[team_name]["roster_completed"]:
+                return False
 
+        logger.info("---- All rosters are complete! ----")
         self.draft_completed = True
         return True
 
@@ -489,12 +507,12 @@ class AuctionDraftSimulator:
             results["teams"][team_name] = {
                 "roster": team["roster"].copy(),
                 "remaining_budget": team["current_budget"],
-                "slots": {
+                "position_counts": {
                     pos: {
-                        "required": slot["required"],
-                        "filled": slot["filled"]
+                        "required": position_count["required"],
+                        "filled": position_count["filled"]
                     }
-                    for pos, slot in team["slots"].items()
+                    for pos, position_count in team["position_counts"].items()
                 }
             }
 
@@ -508,8 +526,8 @@ class AuctionDraftSimulator:
         # Get position needs for RL team
         rl_team = self.teams[self.rl_team_name]
         position_needs: dict[str, int] = {
-            pos: slot["required"] - slot["filled"]
-            for pos, slot in rl_team["slots"].items()
+            pos: position_count["required"] - position_count["filled"]
+            for pos, position_count in rl_team["position_counts"].items()
         }
 
         # Count positions by type for RL team
@@ -524,10 +542,10 @@ class AuctionDraftSimulator:
         for pos in ["QB", "RB", "WR", "TE", "D/ST", "K"]:
             available = len([p for p in self.available_players if p["position"] == pos])
             total_needed = sum(
-                slot["required"] - slot["filled"]
+                position_count["required"] - position_count["filled"]
                 for team in self.teams.values()
-                for pos_slot, slot in team["slots"].items()
-                if pos_slot == pos
+                for _pos, position_count in team["position_counts"].items()
+                if _pos == pos
             )
             position_scarcity[pos] = max(0, total_needed - available)
 
@@ -579,10 +597,10 @@ class AuctionDraftSimulator:
         """
         team = self.teams[team_name]
 
-        # Check each position slot requirement
-        for position, slot in team["slots"].items():
-            if slot["filled"] > slot["required"]:
-                msg = f"needs {slot['required'] - slot['filled']} more {position}.\n"
+        # Check each position count requirement
+        for position, position_count in team["position_counts"].items():
+            if position_count["filled"] > position_count["required"]:
+                msg = f"needs {position_count['required'] - position_count['filled']} more {position}.\n"
                 # msg += f"\nroster needs: {self.get_positions_needed(team_name)}"
                 # msg += f"\nroster has: {', '.join([p['name'] + ' (' + p['position'] + ')' + ' ($' + str(p['bid_amount']) + ')' for p in team['roster']])}"
                 msg += self.get_team_roster_overview_by_slot(team_name)
@@ -597,6 +615,8 @@ class AuctionDraftSimulator:
         for position, player in self.teams[team_name]["roster"].items():
             if player is None:
                 slots.append(f"\t- {position}:")
+            elif 'BENCH' in position:
+                slots.append(f"\t- {position}: {player['name']} ({player['position']}) (${player['bid_amount']})")
             else:
                 slots.append(f"\t- {position}: {player['name']} (${player['bid_amount']})")
 
@@ -604,15 +624,61 @@ class AuctionDraftSimulator:
 
     def get_positions_needed(self, team_name: str) -> list[str]:
         """Get list of positions that still need to be filled for a team"""
-        positions_needed = []
-        for position, slot in self.teams[team_name]["slots"].items():
-            if position == "IR":
-                continue
-            if slot["filled"] < slot["required"]:
-                if position == "RB/WR/TE":
-                    positions_needed.extend(["RB", "WR", "TE"])
-                elif position == "BE":
-                    positions_needed.extend(["QB", "RB", "WR", "TE"])  # Include all positions for bench
-                else:
-                    positions_needed.append(position)
-        return list(set(positions_needed))  # Remove duplicates
+        positions_needed = set()
+        roster = self.teams[team_name]["roster"]
+
+        # Check primary positions
+        if roster["QB"] is None:
+            positions_needed.add("QB")
+
+        # Check RB slots
+        rb_empty = sum(1 for slot in ["RB 1", "RB 2"] if roster[slot] is None)
+        if rb_empty > 0:
+            positions_needed.add("RB")
+
+        # Check WR slots
+        wr_empty = sum(1 for slot in ["WR 1", "WR 2"] if roster[slot] is None)
+        if wr_empty > 0:
+            positions_needed.add("WR")
+
+        # Check TE slot
+        if roster["TE"] is None:
+            positions_needed.add("TE")
+
+        # Check D/ST slot
+        if roster["D/ST"] is None:
+            positions_needed.add("D/ST")
+
+        # Check K slot if it exists
+        if "K" in roster and roster["K"] is None:
+            positions_needed.add("K")
+
+        # Check FLEX slot - only add positions we're short on
+        if roster["FLEX"] is None:
+            rb_count = sum(1 for slot, player in roster.items() if player and player["position"] == "RB")
+            wr_count = sum(1 for slot, player in roster.items() if player and player["position"] == "WR")
+            te_count = sum(1 for slot, player in roster.items() if player and player["position"] == "TE")
+
+            # Add FLEX-eligible positions we're short on
+            if rb_count < 3:  # 2 RB slots + 1 FLEX
+                positions_needed.add("RB")
+            if wr_count < 3:  # 2 WR slots + 1 FLEX
+                positions_needed.add("WR")
+            if te_count < 2:  # 1 TE slot + 1 FLEX
+                positions_needed.add("TE")
+
+        # Add bench needs if we have empty bench slots
+        bench_slots = [slot for slot in roster.keys() if "BENCH" in slot]
+        if any(roster[slot] is None for slot in bench_slots):
+            positions_needed.update(["QB", "RB", "WR", "TE"])
+
+        positions_needed = list(positions_needed)
+
+        # if team_name == self.rl_team_name and self.num_rl_players != self.last_num_rl_players_debugged:
+        #     logger.info(self.get_team_roster_overview_by_slot(team_name))
+        #     logger.info(f"Needed positions: {positions_needed}")
+        #     import pdb; pdb.set_trace()
+
+            # self.last_num_rl_players_debugged = self.num_rl_players
+
+        return positions_needed
