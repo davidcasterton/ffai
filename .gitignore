@@ -35,7 +35,8 @@ ENV/
 .DS_Store
 
 # Project specific
-checkpoints/
+checkpoints*/
+plots/
 logs/
 *.log
 ffai/data/raw/

@@ -107,15 +107,19 @@ class RLModel:
         self.episode_losses = []  # Track losses for each episode
         self.running_reward = 0
         self.alpha = 0.1  # For exponential moving average
+        self.starting_episode = 0  # Track starting episode number
 
         # Load latest checkpoint if available
         if self.checkpoint_dir and self.checkpoint_dir.exists():
             checkpoints = list(self.checkpoint_dir.glob('checkpoint_*.pt'))
             if checkpoints:  # Only try to load if checkpoints exist
-                latest = max(checkpoints, key=lambda x: x.stat().st_mtime)
+                latest = max(checkpoints, key=lambda x: int(x.stem.split('_')[1]))
                 logger.info(f"Loading checkpoint: {latest}")
                 try:
                     self.load_checkpoint(str(latest))  # Pass string path to avoid Path concatenation
+                    # Set starting episode from checkpoint number
+                    self.starting_episode = int(latest.stem.split('_')[1])
+                    logger.info(f"Starting from episode {self.starting_episode}")
                 except Exception as e:
                     logger.warning(f"Failed to load checkpoint {latest}: {e}")
                     logger.info("Starting with fresh model")
@@ -213,19 +217,48 @@ class RLModel:
         if not self.checkpoint_dir:
             return
 
-        # Handle path as string to avoid Path concatenation issues
-        full_path = str(self.checkpoint_dir / path)
+        # Get current episode number from path
+        current_episode = int(path.split('_')[1].split('.')[0])
+
+        # Add to starting episode to get total episodes trained
+        total_episodes = current_episode + self.starting_episode
+
+        # Create checkpoint path with total episode count
+        new_path = f"checkpoint_{total_episodes}.pt"
+        full_path = str(self.checkpoint_dir / new_path)
+
         Path(full_path).parent.mkdir(parents=True, exist_ok=True)
 
+        # Save model checkpoint
         torch.save({
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
+            'starting_episode': self.starting_episode,
+            'total_episodes': total_episodes,
         }, full_path)
-        logger.info(f"Saved checkpoint: {full_path}")
+        logger.info(f"Saved checkpoint at episode {total_episodes}")
 
+        # Save metrics
         if metrics:
-            with open(f"{full_path}.metrics", 'w') as f:
+            metrics_path = str(self.checkpoint_dir / f"checkpoint_{total_episodes}_metrics.json")
+            with open(metrics_path, 'w') as f:
                 json.dump(metrics, f)
+
+        # Clean up old checkpoints - keep only most recent 100
+        checkpoints = sorted(self.checkpoint_dir.glob('checkpoint_*.pt'),
+                            key=lambda x: int(x.stem.split('_')[1]))
+        metrics_files = sorted(self.checkpoint_dir.glob('checkpoint_*_metrics.json'),
+                              key=lambda x: int(x.stem.split('_')[1]))
+
+        # Remove old checkpoint files if we have more than 100
+        if len(checkpoints) > 100:
+            for old_file in checkpoints[:-100]:
+                old_file.unlink()
+
+        # Remove old metrics files if we have more than 100
+        if len(metrics_files) > 100:
+            for old_file in metrics_files[:-100]:
+                old_file.unlink()
 
     def load_checkpoint(self, path):
         """Load model checkpoint"""
@@ -240,24 +273,112 @@ class RLModel:
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
+        # Load starting episode if available
+        if 'current_episode' in checkpoint:
+            self.starting_episode = checkpoint['current_episode']
+
 def calculate_reward(draft_results, standings, weekly_results, rl_team):
-    """Calculate reward based on season performance"""
+    """Calculate reward for episode"""
     reward = 0
 
-    # Weekly wins reward (+1 per win)
+    # Get RL team's roster
+    rl_roster = draft_results[rl_team]["roster"]
+
+    # Roster construction rewards/penalties
+    position_counts = {
+        "QB": 0, "RB": 0, "WR": 0, "TE": 0, "D/ST": 0
+    }
+    total_projected_points = 0
+    total_spent = 0
+    starter_points = 0  # Track projected points for starters
+
+    # First, identify starters and their projected points
+    starters = {
+        "QB": [],
+        "RB": [],
+        "WR": [],
+        "TE": [],
+        "D/ST": []
+    }
+
+    for slot, player in rl_roster.items():
+        if player:
+            pos = player["position"]
+            position_counts[pos] = position_counts.get(pos, 0) + 1
+            points = player.get("projected_points", 0)
+            total_projected_points += points
+            total_spent += player.get("bid_amount", 0)
+
+            # Add to starters list
+            starters[pos].append((points, player))
+
+    # Calculate starter points (top N at each position)
+    if starters["QB"]:
+        starter_points += max(p[0] for p in starters["QB"])  # Best QB
+    if starters["RB"]:
+        starter_points += sum(sorted([p[0] for p in starters["RB"]], reverse=True)[:2])  # Top 2 RBs
+    if starters["WR"]:
+        starter_points += sum(sorted([p[0] for p in starters["WR"]], reverse=True)[:2])  # Top 2 WRs
+    if starters["TE"]:
+        starter_points += max(p[0] for p in starters["TE"])  # Best TE
+    if starters["D/ST"]:
+        starter_points += max(p[0] for p in starters["D/ST"])  # Best D/ST
+
+    # Heavily reward projected starter points
+    reward += starter_points / 25  # Increased weight for starter points
+
+    # Position balance penalties
+    if position_counts["QB"] < 1: reward -= 200  # Must have QB
+    if position_counts["RB"] < 3: reward -= 150  # Need RB depth
+    if position_counts["WR"] < 3: reward -= 150  # Need WR depth
+    if position_counts["TE"] < 1: reward -= 100
+    if position_counts["D/ST"] < 1: reward -= 50
+
+    # Optimal position counts
+    if position_counts["QB"] != 2: reward -= 25 * abs(2 - position_counts["QB"])
+    if position_counts["RB"] != 4: reward -= 25 * abs(4 - position_counts["RB"])
+    if position_counts["WR"] != 4: reward -= 25 * abs(4 - position_counts["WR"])
+    if position_counts["TE"] != 2: reward -= 25 * abs(2 - position_counts["TE"])
+    if position_counts["D/ST"] != 1: reward -= 25 * abs(1 - position_counts["D/ST"])
+
+    # Budget management
+    remaining_budget = 200 - total_spent
+    if remaining_budget < 0:
+        reward -= abs(remaining_budget) * 20  # Severe penalty for going over
+    elif remaining_budget > 20:
+        reward -= remaining_budget  # Penalty for having too much unspent
+
+    # Weekly performance rewards
+    weekly_points = []
     for week in weekly_results.values():
         for match in week:
-            if match['winner'] == rl_team:
-                reward += 1
+            if match['team1'] == rl_team:
+                points = match['team1_score']
+                weekly_points.append(points)
+                if match['winner'] == rl_team:
+                    reward += 75  # win reward
+                if points > 100:
+                    reward += 50  # high-score reward
+            elif match['team2'] == rl_team:
+                points = match['team2_score']
+                weekly_points.append(points)
+                if match['winner'] == rl_team:
+                    reward += 75
+                if points > 100:
+                    reward += 50
 
-    # Final standing reward
+    # Final standing rewards (increased)
     standing_position = next(i for i, (team, _) in enumerate(standings) if team == rl_team)
     if standing_position == 0:  # 1st place
-        reward += 10
+        reward += 500
     elif standing_position == 1:  # 2nd place
-        reward += 5
-    elif standing_position <= 3:  # 3rd or 4th
-        reward += 2
+        reward += 300
+    elif standing_position == 2:  # 3rd place
+        reward += 200
+    elif standing_position == 3:  # 4th place
+        reward += 100
+    elif standing_position >= 8:  # Bottom 4
+        reward -= 100 * (standing_position - 7)  # Progressive penalty for bottom spots
 
     return reward
 
@@ -269,6 +390,7 @@ def train_rl_model(model, num_episodes=1000, checkpoint_frequency=10):
     episode_rewards = []
     episode_draft_rewards = []
     episode_season_rewards = []
+    episode_metrics = []  # New: track detailed metrics
 
     for episode in range(num_episodes):
         episode_start_loss = np.mean(model.episode_losses[-100:]) if model.episode_losses else 0
@@ -307,26 +429,69 @@ def train_rl_model(model, num_episodes=1000, checkpoint_frequency=10):
         avg_draft_reward = np.mean(episode_draft_rewards[-100:])
         avg_season_reward = np.mean(episode_season_rewards[-100:])
 
-        # Log detailed metrics every episode
+        # Calculate detailed metrics
+        episode_metric = {
+            'episode': episode,
+            'draft': {
+                'reward': draft_reward,
+                'total_spent': sum(p['bid_amount'] for p in draft_results['Team 1']['roster'].values() if p),
+                'roster_composition': {
+                    pos: sum(1 for p in draft_results['Team 1']['roster'].values()
+                            if p and p['position'] == pos)
+                    for pos in ['QB', 'RB', 'WR', 'TE', 'D/ST']
+                },
+                'total_projected_points': sum(p.get('projected_points', 0)
+                    for p in draft_results['Team 1']['roster'].values() if p),
+            },
+            'season': {
+                'reward': season_reward,
+                'wins': sum(1 for week in weekly_results.values()
+                          for match in week if match['winner'] == 'Team 1'),
+                'total_points': sum(match['team1_score'] if match['team1'] == 'Team 1'
+                                  else match['team2_score']
+                                  for week in weekly_results.values()
+                                  for match in week
+                                  if 'Team 1' in (match['team1'], match['team2'])),
+                'avg_points_per_week': sum(match['team1_score'] if match['team1'] == 'Team 1'
+                                         else match['team2_score']
+                                         for week in weekly_results.values()
+                                         for match in week
+                                         if 'Team 1' in (match['team1'], match['team2'])) / 17,
+                'final_standing': next(i for i, (team, _) in enumerate(standings) if team == 'Team 1'),
+            },
+            'model': {
+                'loss': episode_end_loss,
+                'running_reward': model.running_reward
+            }
+        }
+        episode_metrics.append(episode_metric)
+
+        # Log detailed metrics
         logger.info(
-            f'Episode {episode:4d} - '
-            f'Loss: {episode_end_loss:8.2f} -> {episode_start_loss:8.2f} | '
-            f'Running Reward: {model.running_reward:8.2f} | '
-            f'Avg Rewards - Total: {avg_total_reward:6.2f}, '
-            f'Draft: {avg_draft_reward:6.2f}, '
-            f'Season: {avg_season_reward:6.2f}'
+            f'Episode {episode:4d}\n'
+            f'Draft - Reward: {episode_metric["draft"]["reward"]:6.2f}, '
+            f'Spent: ${episode_metric["draft"]["total_spent"]}, '
+            f'Projected Points: {episode_metric["draft"]["total_projected_points"]:6.2f}\n'
+            f'Season - Wins: {episode_metric["season"]["wins"]}, '
+            f'Avg Points: {episode_metric["season"]["avg_points_per_week"]:6.2f}, '
+            f'Standing: {episode_metric["season"]["final_standing"] + 1}\n'
+            f'Model - Loss: {episode_metric["model"]["loss"]:8.2f}, '
+            f'Running Reward: {episode_metric["model"]["running_reward"]:8.2f}'
         )
 
-        # Save checkpoint with metrics
+        # Save checkpoint with expanded metrics
         if episode % checkpoint_frequency == 0:
             checkpoint_path = f'checkpoint_{episode}.pt'
             metrics = {
                 'episode': episode,
-                'running_reward': model.running_reward,
-                'avg_total_reward': avg_total_reward,
-                'avg_draft_reward': avg_draft_reward,
-                'avg_season_reward': avg_season_reward,
-                'recent_losses': model.episode_losses[-100:],
+                'running_metrics': {
+                    'reward': model.running_reward,
+                    'total_reward': avg_total_reward,
+                    'draft_reward': avg_draft_reward,
+                    'season_reward': avg_season_reward,
+                },
+                'recent_episodes': episode_metrics[-100:],
+                'losses': model.episode_losses[-100:]
             }
             model.save_checkpoint(checkpoint_path, metrics)
 
