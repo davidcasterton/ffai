@@ -34,6 +34,10 @@ ENV/
 *.swo
 .DS_Store
 
+# PufferLib creates symlinks to its resources dir on import — never commit
+resources
+ffai/resources
+
 # Project specific
 checkpoints*/
 plots/

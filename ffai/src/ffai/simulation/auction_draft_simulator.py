@@ -213,6 +213,92 @@ class AuctionDraftSimulator:
 
         return self.draft_completed, self.teams, total_reward
 
+    def draft_steps(self):
+        """Generator: step-driven auction draft for PufferLib integration.
+
+        Yields (state_dict, player, current_bid) at each RL bidding decision.
+        Caller resumes via .send(max_bid) where max_bid is the maximum the RL
+        team is willing to pay. After each .send(), read self._step_reward for
+        the reward earned by that action (non-zero only when RL team wins a player).
+
+        Raises StopIteration when all rosters are complete.
+        """
+        self._step_reward = 0.0
+        current_nominator_idx: int = 0
+        round_num: int = 0
+
+        while not self.all_rosters_complete():
+            round_num += 1
+            if round_num > 500:
+                logger.error("Draft exceeded maximum rounds (500). Likely a roster completion bug.")
+                for team_name in self.teams.keys():
+                    logger.warning(
+                        f"{team_name} roster:\n"
+                        f"{self.get_team_roster_overview_by_slot(team_name)}"
+                    )
+                break
+
+            nominating_team_name: str = self.nomination_order[current_nominator_idx]
+            if self.teams[nominating_team_name]["roster_completed"]:
+                current_nominator_idx = (current_nominator_idx + 1) % len(self.nomination_order)
+                continue
+
+            try:
+                # All teams (including RL team) use the heuristic nominator.
+                # Nomination strategy is not learned in this port.
+                nominated_player = self.nominate_player(nominating_team_name)
+                if not nominated_player:
+                    current_nominator_idx = (current_nominator_idx + 1) % len(self.nomination_order)
+                    continue
+
+                current_bid: int = 1
+                current_winner: str = nominating_team_name
+                active_bidders: set = set(self.teams.keys())
+
+                while len(active_bidders) > 1:
+                    highest_bid: int = current_bid
+                    highest_bidder = None
+
+                    for team_name in list(active_bidders):
+                        if team_name == current_winner:
+                            continue
+
+                        if not self.should_bid(team_name, nominated_player, current_bid):
+                            active_bidders.remove(team_name)
+                            continue
+
+                        if team_name == self.rl_team_name:
+                            state = self.get_state()
+                            # Yield RL decision point; reset reward after resuming
+                            max_bid = yield (state, nominated_player, current_bid)
+                            self._step_reward = 0.0
+                        else:
+                            randomness = np.random.uniform(-0.1, 0.1)
+                            max_bid = round(nominated_player.get('auction_value', 0) * (1 + randomness))
+
+                        if max_bid > current_bid:
+                            highest_bid = current_bid + 1
+                            highest_bidder = team_name
+
+                    if highest_bidder:
+                        current_bid = highest_bid
+                        current_winner = highest_bidder
+                    else:
+                        break
+
+                logger.debug(f"{current_winner} wins {nominated_player['name']} for ${current_bid}")
+                self.add_player_to_roster(current_winner, nominated_player, current_bid)
+
+                # Set reward if RL team won this player (read by env after next send())
+                if current_winner == self.rl_team_name:
+                    self._step_reward = self._calculate_mid_draft_reward(nominated_player, current_bid)
+
+            except InvalidRosterException as e:
+                logger.warning(f"Invalid roster move: {e}")
+                break
+
+            current_nominator_idx = (current_nominator_idx + 1) % len(self.nomination_order)
+
     def _calculate_mid_draft_reward(self, player: dict, bid_amount: int) -> float:
         """
         Calculate mid-draft reward for RL team using the reward module convention.
