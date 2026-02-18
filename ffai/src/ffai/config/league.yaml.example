@@ -1,0 +1,9 @@
+league:
+  league_id: "YOUR_LEAGUE_ID"
+  year: 2024
+  budget: 200
+
+auth:
+  # Find these in browser DevTools > Application > Cookies after logging into ESPN Fantasy.
+  swid: "{YOUR-SWID-HERE}"
+  espn_s2: "YOUR_ESPN_S2_COOKIE_VALUE"

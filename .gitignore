@@ -43,6 +43,9 @@ ffai/data/raw/
 *.csv
 *.json
 
+# Credentials — never commit
+ffai/src/ffai/config/league.yaml
+
 # Jupyter Notebook
 .ipynb_checkpoints
 *.ipynb
