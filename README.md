@@ -124,6 +124,8 @@ cp ffai/src/ffai/config/league.yaml.example ffai/src/ffai/config/league.yaml
 
 ## Training pipeline
 
+> For a detailed explanation of what the model learns, how it's architected, and the design decisions behind it, see **[MODEL.md](MODEL.md)**.
+
 All commands are run from the repo root (`/path/to/ffai/`) using the venv python.
 
 ### Stage 1 — Collect ESPN historical data
@@ -213,6 +215,8 @@ Season simulator runs every episode. Checkpoint saved to `checkpoints/puffer/pha
 ```
 
 ## Usage
+
+> For details on how the trained model makes decisions, what the bid fraction output means, and how to interpret model behavior, see **[MODEL.md — Using the Trained Model](MODEL.md#13-using-the-trained-model)**.
 
 ### Simulate a draft (post-training evaluation)
 
