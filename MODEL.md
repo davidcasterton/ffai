@@ -506,23 +506,39 @@ This means managers who historically overpay for RBs will continue to do so in s
 
 The simulator extracts a mapping from generic "Team N" draft slots to actual `manager_id` values from the ESPN draft data. This allows per-manager profiles to be attached to each simulated opponent team correctly.
 
-### Why Not Self-Play?
+### Heuristic Bidding Bug Fix
 
-A pure self-play setup would produce opponents that adapt to the RL policy, creating a more adversarial training environment. The current heuristic approach is simpler, more interpretable, and produces a stable and consistent training signal. Self-play remains a potential future upgrade — see [Extending the System](#15-extending-the-system).
+The original `should_bid()` function capped opponents' willingness-to-pay at `player.get("auction_value", 1)`. Because the ESPN pre-draft API returns `auction_value = 0` for most bench players, teams were dropping out of nearly every auction at $1, leaving their full $200 budget unspent. The fix removes this cap — `should_bid()` now only checks budget safety (can the team afford to pay without running out for later picks?). The actual max willingness-to-pay is determined by `_opponent_max_bid()`, which removes teams from the active bidders set when they reach their ceiling.
+
+### Self-Play Opponents (Phase 4)
+
+In Phase 4, heuristic opponents are replaced by a mixture of:
+- **Learned checkpoints** (70%): past snapshots of the RL policy, loaded from the `OpponentPool` checkpoint pool
+- **Heuristic bidders** (30%): the per-manager behavioral models from `manager_tendencies.csv`
+
+The pool is seeded with either a behavioral cloning (BC) reference model (Stage 2) or the phase3 final checkpoint. Every 50K training steps, a snapshot of the current policy is added to the pool (FIFO, max 10 checkpoints).
+
+A learned policy trained to maximize season standing naturally learns to deploy its full $200 budget, because:
+- Every unspent dollar represents forgone player value
+- PPO penalizes strategies that leave budget on the table (→ worse rosters → worse standings)
+- As checkpoint policies improve, they bid more competitively, raising market prices
+
+This creates a virtuous cycle: better opponents → harder training → better RL policy → better opponents.
 
 ---
 
-## 10. Training — Three-Phase Curriculum
+## 10. Training — Four-Phase Curriculum
 
-**Source**: `ffai/scripts/train_puffer.py`
+**Source**: `ffai/scripts/train_puffer.py`, `ffai/scripts/train.py`
 
 Training uses a curriculum to progressively increase difficulty and reward complexity.
 
-| Phase | Timesteps | Season Sim | Season Sim Interval | Num Envs | Purpose |
-|-------|-----------|------------|---------------------|----------|---------|
-| 1 | 100K | No | — | 1 | Draft mechanics warm-up; validate pipeline |
-| 2 | 500K | Yes | Every 10 episodes | 4 | Introduce season sim; learn draft→season link |
-| 3 | 1M | Yes | Every episode | 6 | Full season feedback; optimize for standing |
+| Phase | Timesteps | Season Sim | Season Sim Interval | Opponents | Num Envs | Purpose |
+|-------|-----------|------------|---------------------|-----------|----------|---------|
+| 1 | 100K | No | — | Heuristic | 1 | Draft mechanics warm-up; validate pipeline |
+| 2 | 500K | Yes | Every 10 episodes | Heuristic | 4 | Introduce season sim; learn draft→season link |
+| 3 | 1M | Yes | Every episode | Heuristic | 6 | Full season feedback; optimize for standing |
+| 4 | 500K | Yes | Every episode | Pool (70% ckpt / 30% heuristic) | 6 | Self-play; competitive opponents |
 
 ### Phase 1: Draft Warm-Up
 
@@ -546,15 +562,31 @@ The 10-episode interval keeps the terminal signal sparse initially so it doesn't
 
 Every draft episode generates a terminal reward. The agent is now optimizing directly for the long-horizon objective: win the league. It must balance per-pick value efficiency against roster composition and positional need.
 
+### Phase 4: Self-Play
+
+Opponents are drawn from `OpponentPool` — a FIFO pool of past policy checkpoints. Each episode samples 11 opponent policies (one per opposing team), with 70% drawn from the pool and 30% using the heuristic bidder for diversity. A snapshot of the current policy is added to the pool every 50K steps. The pool is seeded with either the BC reference model (human-realistic baseline) or the phase3 final checkpoint.
+
+Learned opponents naturally learn to spend their full $200 budget (leaving money unspent means a weaker roster and worse standings), creating a more adversarial and realistic training environment than the static heuristic opponents in Phases 1–3.
+
 ### Checkpoint Loading
 
 Phases are loaded sequentially:
 ```
 phase1_final.pt  →  phase2 initialization
 phase2_final.pt  →  phase3 initialization
+phase3_final.pt  →  phase4 initialization + initial opponent pool seed
 ```
 
 This warm-starting prevents wasted compute: each phase begins with the skills developed in previous phases.
+
+### End-to-End Launcher
+
+`ffai/scripts/train.py` chains all phases in sequence:
+```bash
+.venv/bin/python ffai/scripts/train.py              # all phases
+.venv/bin/python ffai/scripts/train.py --from-phase 3  # resume from Phase 3
+.venv/bin/python ffai/scripts/train.py --skip-bc    # skip BC reference training
+```
 
 ---
 
@@ -703,7 +735,7 @@ Uniform random or average-bidder opponents would not reflect the structured patt
 
 ## 15. Extending the System
 
-**Self-Play / Opponent Policy Learning**: Replace heuristic opponents with copies of the RL policy at various training checkpoints. This creates a more adversarial training environment and could close the gap between simulated and live opponent behavior.
+**SPACeR-style BC Anchoring (Stage 2)**: The BC reference model (`bc_reference.py`) trained on historical ESPN data can be used as an auxiliary PPO reward signal (`bc_alpha × log P(action | state, θ_ref)` added to mid-draft reward) to prevent the policy from drifting into degenerate bidding strategies. The `bc_alpha` parameter is configured in `puffer.ini [self_play]` (default 0.05). This stage is not yet integrated into `mid_draft_reward()` but the BC model and checkpoint export are implemented.
 
 **Recurrent Policy (LSTM/Attention)**: The current MLP policy sees only the current state snapshot. An LSTM would allow the agent to reason about bidding dynamics over time within a single draft episode — e.g., "this opponent has bid aggressively on the last 3 players, so they're probably running low."
 

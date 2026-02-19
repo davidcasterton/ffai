@@ -104,6 +104,11 @@ class AuctionDraftSimulator:
         # managers in the order unique teams first appear in draft_df (by pick_number).
         self._team_manager_map: dict[str, str] = _build_team_manager_map(self.draft_df)
 
+        # Optional dict mapping team slot names to LoadedCheckpointPolicy instances.
+        # Set via _make_simulator() in puffer_env for Phase 4 self-play training.
+        # If None, all opponents use the heuristic bidder.
+        self._opponent_policies: dict = {}
+
         self.teams: dict = self.initialize_teams()
         self.nomination_order: list = list(self.teams.keys())
         self.available_players: list = self.initialize_available_players()
@@ -252,11 +257,14 @@ class AuctionDraftSimulator:
                                 self.teams[team_name]["current_budget"]
                             )
                         else:
-                            max_bid = self._opponent_max_bid(team_name, nominated_player)
+                            max_bid = self._opponent_max_bid(team_name, nominated_player, current_bid)
 
                         if max_bid > current_bid:
                             highest_bid = current_bid + 1
                             highest_bidder = team_name
+                        elif team_name != self.rl_team_name:
+                            # Team hit its ceiling — remove so it stops being polled
+                            active_bidders.remove(team_name)
 
                     if highest_bidder:
                         current_bid = highest_bid
@@ -344,11 +352,14 @@ class AuctionDraftSimulator:
                             max_bid = yield (state, nominated_player, current_bid)
                             self._step_reward = 0.0
                         else:
-                            max_bid = self._opponent_max_bid(team_name, nominated_player)
+                            max_bid = self._opponent_max_bid(team_name, nominated_player, current_bid)
 
                         if max_bid > current_bid:
                             highest_bid = current_bid + 1
                             highest_bidder = team_name
+                        elif team_name != self.rl_team_name:
+                            # Team hit its ceiling — remove so it stops being polled
+                            active_bidders.remove(team_name)
 
                     if highest_bidder:
                         current_bid = highest_bid
@@ -369,14 +380,26 @@ class AuctionDraftSimulator:
 
             current_nominator_idx = (current_nominator_idx + 1) % len(self.nomination_order)
 
-    def _opponent_max_bid(self, team_name: str, player: dict) -> float:
+    def _opponent_max_bid(self, team_name: str, player: dict, current_bid: float = 0.0) -> float:
         """
         Estimate the maximum an opponent is willing to pay for a player.
 
-        Uses per-manager bid_per_proj_pt from manager_tendencies when available
-        (via _team_manager_map). Falls back to league-average tendencies, then to
-        auction_value * (1 ± 0.10).
+        If opponent_policies has a checkpoint policy for this team, delegates to
+        that policy's get_bid(). Otherwise uses per-manager bid_per_proj_pt from
+        manager_tendencies when available (via _team_manager_map). Falls back to
+        league-average tendencies, then to projected_points * fallback_rate.
+
+        Args:
+            team_name: the opposing team slot (e.g. "Team 2")
+            player: player dict from available_players
+            current_bid: current highest bid (used by checkpoint policies)
         """
+        # Checkpoint policy override
+        if self._opponent_policies and team_name in self._opponent_policies:
+            policy = self._opponent_policies[team_name]
+            if policy is not None:
+                return policy.get_bid(self, team_name, player, current_bid)
+
         pos = player.get('position', '').lower()
         proj_pts = float(player.get('projected_points', 0.0))
         fallback_value = float(player.get('auction_value', 0))
@@ -558,7 +581,14 @@ class AuctionDraftSimulator:
             self.check_if_roster_is_valid(team_name)
 
     def should_bid(self, team: str, player: dict, current_bid: int) -> bool:
-        """Determine if a team should bid on this player."""
+        """Determine if a team should bid on this player.
+
+        Only checks roster eligibility and budget safety — does NOT cap at
+        auction_value (which is often 0 in the ESPN pre-draft API for bench
+        players). The actual max willingness-to-pay is handled by
+        _opponent_max_bid(), which drops teams from active_bidders when they
+        reach their ceiling.
+        """
         if self.teams[team]["roster_completed"]:
             return False
 
@@ -583,16 +613,12 @@ class AuctionDraftSimulator:
         if player["position"] not in needed_positions:
             return False
 
-        max_bid = min(
-            self.teams[team]["current_budget"],
-            player.get("auction_value", 1)
-        )
+        # Budget safety: can pay current_bid and still fill remaining roster at $1/slot
         can_afford = (
             self.teams[team]["current_budget"] - current_bid
             >= self.get_min_budget_needed_to_complete_roster(team)
         )
-
-        return current_bid <= max_bid and can_afford
+        return can_afford
 
     def nominate_player(self, team_name: str):
         """Select a player to nominate for auction."""
@@ -702,6 +728,86 @@ class AuctionDraftSimulator:
             'draft_progress': len(self.players_drafted) / (len(self.teams) * num_roster_slots),
             'total_team_points': sum(
                 p["projected_points"] for p in rl_team["roster"].values() if p
+            ),
+            'opponent_tendencies': opponent_tendencies,
+        }
+
+    def get_state_for(self, team_name: str) -> dict:
+        """
+        Get current state dict from the perspective of any team.
+
+        Identical to get_state() but substitutes team_name for self.rl_team_name
+        so that checkpoint policies can observe the draft from their own POV.
+        The returned dict uses the same keys as get_state() so build_state()
+        can process it without modification.
+        """
+        num_roster_slots = 14
+
+        team = self.teams[team_name]
+        position_needs: dict = {
+            pos: pc["required"] - pc["filled"]
+            for pos, pc in team["position_counts"].items()
+        }
+
+        position_counts = {}
+        for slot, player in team["roster"].items():
+            if player is not None:
+                pos = player["position"]
+                position_counts[pos] = position_counts.get(pos, 0) + 1
+
+        position_scarcity = {}
+        for pos in ["QB", "RB", "WR", "TE", "D/ST", "K"]:
+            available = len([p for p in self.available_players if p["position"] == pos])
+            total_needed = sum(
+                pc["required"] - pc["filled"]
+                for t in self.teams.values()
+                for _pos, pc in t["position_counts"].items()
+                if _pos == pos
+            )
+            position_scarcity[pos] = max(0, total_needed - available)
+
+        position_values = {}
+        for pos in ["QB", "RB", "WR", "TE", "D/ST", "K"]:
+            pos_players = [p for p in self.available_players if p["position"] == pos]
+            if pos_players:
+                position_values[pos] = {
+                    "avg_value": float(np.mean([p.get("auction_value", 0) for p in pos_players])),
+                    "avg_points": float(np.mean([p.get("projected_points", 0) for p in pos_players])),
+                }
+
+        total_needs = sum(position_needs.values())
+
+        # Opponent tendencies (top-3 by remaining budget, excluding team_name)
+        opponent_tendencies = []
+        if self._manager_tendencies:
+            opp_budgets_sorted = sorted(
+                [(t, self.teams[t]["current_budget"]) for t in self.teams if t != team_name],
+                key=lambda x: x[1], reverse=True
+            )
+            avg_tendency = {}
+            for col in ["rb_budget_share", "wr_budget_share", "high_bid_rate",
+                        "dollar_one_rate", "bid_per_proj_pt_rb", "bid_per_proj_pt_wr"]:
+                vals = [float(row.get(col, 0) or 0) for row in self._manager_tendencies.values()]
+                avg_tendency[col] = float(np.mean(vals)) if vals else 0.0
+            opponent_tendencies = [avg_tendency] * min(3, len(opp_budgets_sorted))
+
+        return {
+            'rl_team_budget': team["current_budget"],
+            'opponent_budgets': [self.teams[t]["current_budget"] for t in self.teams if t != team_name],
+            'draft_turn': len(self.players_drafted),
+            'teams': list(self.teams.keys()),
+            'predicted_points_per_slot': {
+                t: self.get_points_per_slot(t, num_roster_slots)
+                for t in self.teams
+            },
+            'position_needs': position_needs,
+            'position_counts': position_counts,
+            'position_scarcity': position_scarcity,
+            'position_values': position_values,
+            'remaining_budget_per_need': team["current_budget"] / max(1, total_needs),
+            'draft_progress': len(self.players_drafted) / (len(self.teams) * num_roster_slots),
+            'total_team_points': sum(
+                p["projected_points"] for p in team["roster"].values() if p
             ),
             'opponent_tendencies': opponent_tendencies,
         }

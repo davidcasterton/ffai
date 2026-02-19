@@ -21,15 +21,17 @@ PufferLib is installed from source at `/home/dave/code/public/PufferLib/` (requi
 
 All three directories are gitignored (local only). When adding a processing step, write a script that reads from `{league_name}/` or `nflverse/` and writes to `{league_name}_processed/` so the transformation is auditable.
 
-## README Maintenance
+## README AND MODEL Maintenance
 
-Keep `README.md` up to date whenever you make changes that affect:
+Keep `README.md` and `MODEL.md` up to date whenever you make changes that affect:
 - The training pipeline (new stages, changed script names or arguments)
 - The directory structure (new files, renamed paths)
 - The architecture (new models, state dimensions, data sources)
 - Setup instructions (new dependencies, environment steps)
 
-Update the README as part of the same commit as the code change — don't leave it for later.
+The README file should give a high level human readable explanation of this repo, the MODEL file should give a detailed design of the RL model being trained. README should be easy to understand, MODEL should be detail rich and give enough information to understand the machine learning aspects of this project.
+
+Update the README and MODEL as part of the same commit as the code change — don't leave it for later.
 
 ## Plans
 
@@ -40,3 +42,5 @@ plans/YYYY-MM-DD_{short description}.md
 ```
 
 Example: `plans/2026-02-18_rl-training-refactor.md`
+
+When implementing a plan save the plan file first, then proceed to implement the associated code.

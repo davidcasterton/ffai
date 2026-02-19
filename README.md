@@ -28,14 +28,15 @@ ESPN Historical Data (2009-2024)          nflverse Data (2009-2024)
                     → checkpoints/value_model/best_model.pt
                             |
                             v
-                  [train_puffer.py] — PufferLib PPO, 3-phase curriculum
+                  [train_puffer.py] — PufferLib PPO, 4-phase curriculum
+                  [train.py] — end-to-end launcher (chains all phases)
                   [AuctionDraftPolicy] — Gaussian policy, 72-dim state
                     State:  budget, roster needs, player PAR, opponent budgets,
                             market scarcity, player history, position strategy,
                             opponent tendencies
                     Action: bid fraction ∈ [0, 1]  →  max_bid = fraction × budget
                     Reward: value_efficiency (mid-draft) + season standing (terminal)
-                    → checkpoints/puffer/phase{1,2,3}_final.pt
+                    → checkpoints/puffer/phase{1,2,3,4}_final.pt
                             |
                             v
                   [Interfaces]
@@ -53,7 +54,9 @@ ffai/
 │   ├── build_features.py       # Stage 3: build processed feature CSVs
 │   ├── analyze_strategy.py     # exploratory: position ROI, manager tendencies, projection bias
 │   ├── train_value_model.py    # Stage 4: train supervised value model
-│   ├── train_puffer.py         # Stage 5: PufferLib PPO curriculum training
+│   ├── train_puffer.py         # Stage 5: PufferLib PPO curriculum training (phases 1-4)
+│   ├── train_bc_reference.py   # Stage 5b (optional): train BC reference model for self-play
+│   ├── train.py                # End-to-end launcher: chains all phases in sequence
 │   ├── simulate_draft.py       # post-training: full draft simulation with transcript output
 │   ├── advisory_draft.py       # live draft advisory mode
 │   └── autonomous_draft.py     # autonomous ESPN draft room control
@@ -62,7 +65,7 @@ ffai/
     │   ├── league.yaml          # ESPN credentials + league_id (gitignored)
     │   ├── league.yaml.example  # template
     │   ├── training.yaml        # value model hyperparameters
-    │   └── puffer.ini           # PufferLib PPO hyperparameters
+    │   └── puffer.ini           # PufferLib PPO hyperparameters + [self_play] section
     ├── data/
     │   ├── espn_scraper.py      # ESPN API client
     │   ├── preprocessor.py      # PAR/VORP calculation, 14-feature vector
@@ -82,8 +85,10 @@ ffai/
     ├── rl/
     │   ├── puffer_env.py        # AuctionDraftEnv(PufferEnv) — PufferLib native env
     │   ├── puffer_policy.py     # AuctionDraftPolicy — Gaussian policy (72-dim state)
-    │   ├── state_builder.py     # build_state() → 72-dim float32 tensor
+    │   ├── state_builder.py     # build_state() → 72-dim float32 tensor (perspective-aware)
     │   ├── reward.py            # mid_draft_reward(), terminal_reward()
+    │   ├── opponent_pool.py     # OpponentPool + LoadedCheckpointPolicy for self-play
+    │   ├── bc_reference.py      # BCReferenceModel — behavioral cloning on ESPN data
     │   ├── ppo_agent.py         # legacy custom PPO (superseded by puffer pipeline)
     │   └── replay_buffer.py     # GAE rollout buffer (legacy)
     ├── simulation/
@@ -178,9 +183,24 @@ Trains a two-head neural network on 14 features per player per year:
 
 Best checkpoint saved to `checkpoints/value_model/best_model.pt`.
 
-### Stage 5 — Train the PPO agent (three-phase curriculum)
+### Stage 5 — Train the PPO agent (four-phase curriculum)
 
 Training uses PufferLib's vectorized PPO with multiprocessing workers. Each episode is a full 12-team auction draft (~168 total nominations). The RL agent makes one decision per bidding round it participates in — it is polled every round a nomination is in progress and it hasn't dropped out. For contested players it may make several decisions as the price climbs; for players it passes on it makes zero. Total RL decisions per episode is typically in the range of 50-200. Phase checkpoints are loaded sequentially.
+
+**Option A — run all phases with the end-to-end launcher (recommended):**
+
+```bash
+# Full pipeline (phases 1-4 + optional BC reference model)
+.venv/bin/python ffai/scripts/train.py
+
+# Resume from Phase 3
+.venv/bin/python ffai/scripts/train.py --from-phase 3
+
+# Quick smoke test (500 steps per phase)
+.venv/bin/python ffai/scripts/train.py --smoke-test
+```
+
+**Option B — run individual phases manually:**
 
 **Phase 1 — draft warm-up (100K steps, no season sim)**
 
@@ -207,6 +227,28 @@ Season simulator runs every 10 episodes per worker (~20% of episodes get termina
 ```
 
 Season simulator runs every episode. Checkpoint saved to `checkpoints/puffer/phase3_final.pt`.
+
+**Phase 4 — self-play vs. checkpoint pool (500K steps)**
+
+```bash
+.venv/bin/python ffai/scripts/train_puffer.py --curriculum-phase 4 \
+  --load-model-path checkpoints/puffer/phase3_final.pt \
+  --seed-pool-path checkpoints/puffer/phase3_final.pt
+```
+
+Opponents are drawn from a pool of past RL checkpoints (70%) mixed with heuristic bidders (30%). A snapshot of the current policy is added to the pool every 50K steps. Checkpoint saved to `checkpoints/puffer/phase4_final.pt`.
+
+**(Optional) Stage 5b — Behavioral cloning reference model:**
+
+```bash
+# Train BC model on historical ESPN data (improves self-play opponent quality)
+.venv/bin/python ffai/scripts/train_bc_reference.py --years 2019-2024 --export-checkpoint
+
+# Use as Phase 4 pool seed for human-realistic opponents
+.venv/bin/python ffai/scripts/train_puffer.py --curriculum-phase 4 \
+  --load-model-path checkpoints/puffer/phase3_final.pt \
+  --seed-pool-path checkpoints/bc/bc_as_policy.pt
+```
 
 **Quick smoke test (500 steps):**
 
@@ -268,3 +310,4 @@ The browser window stays visible (`headless=False`) so you can monitor and inter
 - `plans/2026-02-18_hybrid-ml-redesign.md` — hybrid supervised + PPO architecture
 - `plans/2026-02-18_feature-engineering-and-data-expansion.md` — nflverse integration, 72-dim state, feature store
 - `plans/2026-02-18_draft-simulation-and-opponent-modeling.md` — simulate_draft.py, per-manager opponent modeling, self-play research synthesis
+- `plans/2026-02-19_self-play-auction-draft.md` — self-play via checkpoint pool + BC reference model (Phase 4)

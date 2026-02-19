@@ -18,6 +18,7 @@ Data loading:
 
 import logging
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import gymnasium
@@ -27,6 +28,7 @@ import pufferlib
 from ffai.simulation.auction_draft_simulator import AuctionDraftSimulator, _build_team_manager_map
 from ffai.rl.state_builder import build_state, STATE_DIM
 from ffai.rl.reward import terminal_reward, normalize_terminal_reward
+from ffai.rl.opponent_pool import OpponentPool
 from ffai.data.espn_scraper import load_league_config as _load_league_config
 
 logger = logging.getLogger(__name__)
@@ -69,6 +71,7 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
         budget: int = 200,
         enable_season_sim: bool = False,
         season_sim_interval: int = 10,
+        opponent_pool=None,
         buf=None,
         seed=None,
     ):
@@ -76,6 +79,9 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
         self.budget = budget
         self.enable_season_sim = enable_season_sim
         self.season_sim_interval = season_sim_interval
+        # Optional OpponentPool for Phase 4 self-play training.
+        # When set, each episode samples learned opponent policies from the pool.
+        self.opponent_pool: Optional[OpponentPool] = opponent_pool
         self._episode_count = 0
         self._sim = None
         self._gen = None
@@ -152,6 +158,11 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
 
         # Build "Team N" → manager_id mapping (same logic as AuctionDraftSimulator.__init__)
         sim._team_manager_map = _build_team_manager_map(draft_df)
+
+        # Phase 4 self-play: sample opponent policies from the pool when available
+        sim._opponent_policies = {}
+        if self.opponent_pool is not None and not self.opponent_pool.is_empty:
+            sim._opponent_policies = self.opponent_pool.sample_opponents(n=11)
 
         return sim
 

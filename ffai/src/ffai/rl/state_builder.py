@@ -50,6 +50,7 @@ POSITION_STARTER_SLOTS = {
 
 def build_state(
     sim_state: Dict[str, Any],
+    team_name: Optional[str] = None,
     current_player: Optional[Dict[str, Any]] = None,
     current_bid: float = 0.0,
     feature_store=None,
@@ -59,7 +60,11 @@ def build_state(
     Build a 72-dim state tensor from the simulation state dict.
 
     Args:
-        sim_state: dict returned by AuctionDraftSimulator.get_state()
+        sim_state: dict returned by AuctionDraftSimulator.get_state() or
+                   get_state_for(team_name) for perspective-aware observation.
+        team_name: the team whose perspective this state represents (for
+                   documentation; the state dict must already be perspective-
+                   correct, built via sim.get_state_for(team_name)).
         current_player: player dict being currently bid on (can be None during nomination)
         current_bid: current highest bid amount (0 if nominating)
         feature_store: optional FeatureStore instance for dims 56-71
