@@ -44,6 +44,7 @@ plots/
 logs/
 *.log
 ffai/data/raw/
+ffai/data/processed/
 *.csv
 *.json
 
