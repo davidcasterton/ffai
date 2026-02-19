@@ -88,18 +88,24 @@ class _RLBidder:
 
 
 def _build_team_manager_display(sim) -> dict[str, str]:
-    """Return {team_name: display_name} using draft_df manager names."""
+    """Return {team_name: display_name} using draft_df manager names.
+
+    Uses sim._team_manager_map (slot → manager_id) to look up each manager's
+    display name, since draft_df["team_name"] contains ESPN team names, not
+    the generic "Team N" slot names used internally by the simulator.
+    """
     display = {}
     df = getattr(sim, "draft_df", None)
-    if df is None:
-        return display
-
-    name_cols = [c for c in ["manager_display_name", "manager_first_name"] if c in df.columns]
-    if not name_cols:
+    team_manager_map = getattr(sim, "_team_manager_map", {})
+    if df is None or "manager_id" not in df.columns:
         return display
 
     for team_name in sim.teams:
-        rows = df[df["team_name"] == team_name]
+        manager_id = team_manager_map.get(team_name)
+        if not manager_id:
+            display[team_name] = ""
+            continue
+        rows = df[df["manager_id"] == manager_id]
         if rows.empty:
             display[team_name] = ""
             continue
@@ -110,6 +116,8 @@ def _build_team_manager_display(sim) -> dict[str, str]:
             first = str(row.get("manager_first_name", ""))
             last = str(row.get("manager_last_name", ""))
             display[team_name] = f"{first} {last}".strip()
+        else:
+            display[team_name] = ""
     return display
 
 
@@ -214,7 +222,7 @@ def _run_simulation(
         t_label = f"{team_name} [RL]" if team_name == rl_team and rl_bidder else team_name
         header_parts = [t_label]
         if mgr_name:
-            header_parts.append(f"Manager: {mgr_name}")
+            header_parts.append(f"({mgr_name})")
         header_parts.append(f"Spent: ${spent} / $200")
         lines.append("  ".join(header_parts))
 
