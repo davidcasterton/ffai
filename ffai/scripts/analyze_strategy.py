@@ -23,7 +23,7 @@ import numpy as np
 from scipy import stats as scipy_stats
 
 FAVREFIGNEWTON = Path(__file__).parent.parent / "src/ffai/data/favrefignewton"
-PROCESSED = Path(__file__).parent.parent / "src/ffai/data/processed"
+PROCESSED = Path(__file__).parent.parent / "src/ffai/data/favrefignewton_processed"
 LEAGUE_ID = "770280"
 POSITIONS = ["QB", "RB", "WR", "TE"]
 ALL_YEARS = list(range(2009, 2025))

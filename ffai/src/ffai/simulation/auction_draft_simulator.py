@@ -62,7 +62,7 @@ class AuctionDraftSimulator:
         # Load manager tendencies for use in opponent bidding heuristic
         self._manager_tendencies: dict = {}
         if self.feature_store is not None:
-            mt_path = Path(__file__).parent.parent / "data/processed/manager_tendencies_770280.csv"
+            mt_path = Path(__file__).parent.parent / "data/favrefignewton_processed/manager_tendencies_770280.csv"
             if mt_path.exists():
                 import csv
                 with open(mt_path) as f:

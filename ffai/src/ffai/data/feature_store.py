@@ -2,7 +2,7 @@
 FeatureStore — unified loader for all processed feature CSVs.
 
 Provides per-lookup access with position-year mean imputation for missing players.
-All CSVs are written by scripts/build_features.py and live in data/processed/.
+All CSVs are written by scripts/build_features.py and live in data/favrefignewton_processed/.
 """
 
 import logging
@@ -13,7 +13,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-PROCESSED_DIR = Path(__file__).parent / "processed"
+PROCESSED_DIR = Path(__file__).parent / "favrefignewton_processed"
 LEAGUE_ID = "770280"
 
 PLAYER_HISTORY_COLS = [

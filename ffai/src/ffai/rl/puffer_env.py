@@ -131,7 +131,7 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
                 import csv
                 fs = FeatureStore()
                 mgr_tend = {}
-                mt_path = Path(__file__).parent.parent / "data/processed/manager_tendencies_770280.csv"
+                mt_path = Path(__file__).parent.parent / "data/favrefignewton_processed/manager_tendencies_770280.csv"
                 if mt_path.exists():
                     with open(mt_path) as f:
                         reader = csv.DictReader(f)

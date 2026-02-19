@@ -2,7 +2,7 @@
 """
 Build all processed feature CSVs from ESPN (favrefignewton) + nflverse data.
 
-Writes to ffai/src/ffai/data/processed/:
+Writes to ffai/src/ffai/data/favrefignewton_processed/:
   player_history_{league_id}.csv     — per-(player_id, year) lookback features
   manager_tendencies_{league_id}.csv — per-manager bidding profile
   position_strategy_{league_id}.csv  — per-(position, year) strategic signals
@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import pandas as pd
 
-PROCESSED_DIR = Path(__file__).parent.parent / "src/ffai/data/processed"
+PROCESSED_DIR = Path(__file__).parent.parent / "src/ffai/data/favrefignewton_processed"
 FAVREFIGNEWTON_DIR = Path(__file__).parent.parent / "src/ffai/data/favrefignewton"
 NFLVERSE_DIR = Path(__file__).parent.parent / "src/ffai/data/nflverse"
 

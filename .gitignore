@@ -44,7 +44,7 @@ plots/
 logs/
 *.log
 ffai/src/ffai/data/favrefignewton/
-ffai/src/ffai/data/processed/
+ffai/src/ffai/data/favrefignewton_processed/
 *.csv
 *.json
 
