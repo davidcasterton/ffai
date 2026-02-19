@@ -14,7 +14,7 @@ import numpy as np
 from pathlib import Path
 import json
 from ffai import get_logger
-from ffai.data.espn_scraper import ESPNDraftScraper
+from ffai.data.espn_scraper import ESPNDraftScraper, load_league_config
 import copy
 import logging
 
@@ -69,7 +69,10 @@ class AuctionDraftSimulator:
         self.rl_model = rl_model
         self.draft_completed: bool = False
 
-        self.data_dir = Path(__file__).parent.parent / "data/favrefignewton"
+        _cfg = load_league_config()
+        _league_name = _cfg["league"]["league_name"]
+        _league_id = _cfg["league"]["league_id"]
+        self.data_dir = Path(__file__).parent.parent / f"data/{_league_name}"
 
         scraper = ESPNDraftScraper()
         self.draft_df, self.stats_df, self.weekly_df, self.predraft_df, self.settings = scraper.load_or_fetch_data(self.year)
@@ -88,7 +91,7 @@ class AuctionDraftSimulator:
         # Load manager tendencies for use in opponent bidding heuristic
         self._manager_tendencies: dict = {}
         if self.feature_store is not None:
-            mt_path = Path(__file__).parent.parent / "data/favrefignewton_processed/manager_tendencies_770280.csv"
+            mt_path = Path(__file__).parent.parent / f"data/{_league_name}_processed/manager_tendencies_{_league_id}.csv"
             if mt_path.exists():
                 import csv
                 with open(mt_path) as f:

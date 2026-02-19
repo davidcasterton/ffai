@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Build all processed feature CSVs from ESPN (favrefignewton) + nflverse data.
+Build all processed feature CSVs from ESPN league data + nflverse data.
 
-Writes to ffai/src/ffai/data/favrefignewton_processed/:
+Writes to ffai/src/ffai/data/{league_name}_processed/:
   player_history_{league_id}.csv     — per-(player_id, year) lookback features
   manager_tendencies_{league_id}.csv — per-manager bidding profile
   position_strategy_{league_id}.csv  — per-(position, year) strategic signals
 
+League name and ID are read from config/league.yaml.
+
 Usage:
-    python scripts/build_features.py [--league-id 770280] [--years 2009-2024]
+    python scripts/build_features.py [--league-id ID] [--years 2009-2024]
 """
 
 import argparse
@@ -18,9 +20,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import pandas as pd
+from ffai.data.espn_scraper import load_league_config
 
-PROCESSED_DIR = Path(__file__).parent.parent / "src/ffai/data/favrefignewton_processed"
-FAVREFIGNEWTON_DIR = Path(__file__).parent.parent / "src/ffai/data/favrefignewton"
+_cfg = load_league_config()
+_league_name = _cfg["league"]["league_name"]
+_league_id = _cfg["league"]["league_id"]
+
+PROCESSED_DIR = Path(__file__).parent.parent / f"src/ffai/data/{_league_name}_processed"
+FAVREFIGNEWTON_DIR = Path(__file__).parent.parent / f"src/ffai/data/{_league_name}"
 NFLVERSE_DIR = Path(__file__).parent.parent / "src/ffai/data/nflverse"
 
 
@@ -30,13 +37,13 @@ def build_player_history(years: list[int], league_id: str) -> pd.DataFrame:
     from ffai.data.feature_engineering.nfl_feature_builder import build_nfl_features
 
     print("  Loading ESPN season data...")
-    season_df = load_espn_season_data(years=years)
+    season_df = load_espn_season_data(years=years, data_dir=FAVREFIGNEWTON_DIR, league_id=league_id)
 
     print("  Building multi-year lookback features...")
     history = _build(season_df, target_years=years)
 
     print("  Computing weekly consistency features (ESPN, 2019+)...")
-    weekly_raw = load_weekly_fantasy_points(years=years)
+    weekly_raw = load_weekly_fantasy_points(years=years, data_dir=FAVREFIGNEWTON_DIR, league_id=league_id)
     # weekly_raw is per prior year; shift: we want Y-1 consistency for a player in year Y
     weekly_raw["lookback_year"] = weekly_raw["year"] + 1
     consistency = compute_weekly_consistency(weekly_raw)
@@ -61,7 +68,7 @@ def build_player_history(years: list[int], league_id: str) -> pd.DataFrame:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build processed feature CSVs for ffai")
-    parser.add_argument("--league-id", default="770280")
+    parser.add_argument("--league-id", default=_league_id)
     parser.add_argument("--years", default="2009-2024")
     args = parser.parse_args()
 

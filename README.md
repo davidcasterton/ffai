@@ -9,13 +9,13 @@ ESPN Historical Data (2009-2024)          nflverse Data (2009-2024)
          |                                          |
          v                                          v
 [collect_data.py]                       [fetch_nfl_data.py]
-  → data/favrefignewton/                  → data/nflverse/*.parquet
+  → data/{league_name}/                  → data/nflverse/*.parquet
          |                                          |
          +------------------+-----------------------+
                             |
                             v
                   [build_features.py]
-                    → data/favrefignewton_processed/
+                    → data/{league_name}_processed/
                       player_history_{id}.csv       (3yr pts avg, consistency, YoY)
                       manager_tendencies_{id}.csv   (per-manager bidding profiles)
                       position_strategy_{id}.csv    (ROI, winning budget shares)
@@ -73,9 +73,9 @@ ffai/
     │   │   ├── nfl_feature_builder.py  # targets/game, carries/game, snap %, draft round
     │   │   ├── manager_tendencies.py   # per-manager budget shares, bid rates
     │   │   └── position_strategy.py    # per-(position, year) ROI and winning patterns
-    │   ├── favrefignewton/      # ESPN raw data (gitignored, local only)
+    │   ├── {league_name}/       # ESPN raw data (gitignored, local only)
     │   ├── nflverse/            # nflverse parquets (git LFS)
-    │   └── favrefignewton_processed/  # derived feature CSVs (gitignored, local only)
+    │   └── {league_name}_processed/   # derived feature CSVs (gitignored, local only)
     ├── value_model/
     │   ├── player_value_model.py  # two-head supervised model (points + dollar)
     │   └── value_trainer.py       # training loop with early stopping
@@ -116,7 +116,8 @@ playwright install chromium
 
 ```bash
 cp ffai/src/ffai/config/league.yaml.example ffai/src/ffai/config/league.yaml
-# Edit league.yaml with your ESPN league_id, SWID, and espn_s2 cookies.
+# Edit league.yaml with your ESPN league_id, league_name, SWID, and espn_s2 cookies.
+# league_name determines the data directory (data/{league_name}/).
 # Find SWID and espn_s2 in browser DevTools > Application > Cookies
 # after logging into ESPN Fantasy Football.
 ```
@@ -131,7 +132,7 @@ All commands are run from the repo root (`/path/to/ffai/`) using the venv python
 .venv/bin/python ffai/scripts/collect_data.py --years 2009-2024
 ```
 
-Downloads draft results, player stats, pre-draft values, and weekly scoring from ESPN for each year. Cached under `ffai/src/ffai/data/favrefignewton/`.
+Downloads draft results, player stats, pre-draft values, and weekly scoring from ESPN for each year. Cached under `ffai/src/ffai/data/{league_name}/` (where `league_name` comes from `config/league.yaml`).
 
 ### Stage 2 — Download nflverse data
 
@@ -144,10 +145,10 @@ Downloads 6 nflverse datasets (player stats, rosters, snap counts, draft picks, 
 ### Stage 3 — Build feature CSVs
 
 ```bash
-.venv/bin/python ffai/scripts/build_features.py --league-id 770280 --years 2009-2024
+.venv/bin/python ffai/scripts/build_features.py --years 2009-2024
 ```
 
-Produces 3 CSVs in `ffai/src/ffai/data/favrefignewton_processed/`:
+The `--league-id` argument defaults to the value in `config/league.yaml`. Produces 3 CSVs in `ffai/src/ffai/data/{league_name}_processed/`:
 - `player_history_{id}.csv` — per-(player_id, year): 3yr avg points, YoY change, projection accuracy, weekly consistency
 - `manager_tendencies_{id}.csv` — per-manager: RB/WR budget shares, bid aggressiveness, $1-bid rate
 - `position_strategy_{id}.csv` — per-(position, year): ROI, projection accuracy, winning team budget shares

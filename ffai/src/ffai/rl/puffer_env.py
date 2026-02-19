@@ -27,6 +27,7 @@ import pufferlib
 from ffai.simulation.auction_draft_simulator import AuctionDraftSimulator, _build_team_manager_map
 from ffai.rl.state_builder import build_state, STATE_DIM
 from ffai.rl.reward import terminal_reward, normalize_terminal_reward
+from ffai.data.espn_scraper import load_league_config as _load_league_config
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,10 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
         sim.rl_team_name = "Team 1"
         sim.rl_model = None
         sim.draft_completed = False
-        sim.data_dir = Path(__file__).parent.parent / "data/favrefignewton"
+        _cfg = _load_league_config()
+        _league_name = _cfg["league"]["league_name"]
+        _league_id = _cfg["league"]["league_id"]
+        sim.data_dir = Path(__file__).parent.parent / f"data/{_league_name}"
 
         # Inject cached data
         sim.draft_df = draft_df
@@ -131,7 +135,7 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
                 import csv
                 fs = FeatureStore()
                 mgr_tend = {}
-                mt_path = Path(__file__).parent.parent / "data/favrefignewton_processed/manager_tendencies_770280.csv"
+                mt_path = Path(__file__).parent.parent / f"data/{_league_name}_processed/manager_tendencies_{_league_id}.csv"
                 if mt_path.exists():
                     with open(mt_path) as f:
                         reader = csv.DictReader(f)

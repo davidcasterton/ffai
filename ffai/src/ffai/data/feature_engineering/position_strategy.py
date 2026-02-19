@@ -18,16 +18,23 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-FAVREFIGNEWTON_DIR = Path(__file__).parent.parent / "favrefignewton"
-LEAGUE_ID = "770280"
 ALL_SEASONS = list(range(2009, 2025))
 POSITIONS = ["QB", "RB", "WR", "TE", "K", "D/ST"]
 
 
-def _load_year(year: int, data_dir: Path) -> pd.DataFrame | None:
-    dr_path = data_dir / f"draft_results_{LEAGUE_ID}_{year}.csv"
-    ps_path = data_dir / f"player_stats_{LEAGUE_ID}_{year}.csv"
-    pv_path = data_dir / f"predraft_values_{LEAGUE_ID}_{year}.csv"
+def _default_espn_data_dir_and_id():
+    from ffai.data.espn_scraper import load_league_config
+    cfg = load_league_config()
+    league_name = cfg["league"]["league_name"]
+    league_id = cfg["league"]["league_id"]
+    data_dir = Path(__file__).parent.parent / league_name
+    return data_dir, league_id
+
+
+def _load_year(year: int, data_dir: Path, league_id: str) -> pd.DataFrame | None:
+    dr_path = data_dir / f"draft_results_{league_id}_{year}.csv"
+    ps_path = data_dir / f"player_stats_{league_id}_{year}.csv"
+    pv_path = data_dir / f"predraft_values_{league_id}_{year}.csv"
 
     if not dr_path.exists() or not ps_path.exists() or not pv_path.exists():
         return None
@@ -48,16 +55,21 @@ def _load_year(year: int, data_dir: Path) -> pd.DataFrame | None:
 
 def build_position_strategy(
     years: list[int] | None = None,
-    data_dir: Path = FAVREFIGNEWTON_DIR,
+    data_dir: Path = None,
+    league_id: str = None,
 ) -> pd.DataFrame:
     """
     Build per-(position, year) strategic signal DataFrame.
     """
+    if data_dir is None or league_id is None:
+        _dir, _id = _default_espn_data_dir_and_id()
+        data_dir = data_dir or _dir
+        league_id = league_id or _id
     years = years or ALL_SEASONS
     records = []
 
     for year in years:
-        df = _load_year(year, data_dir)
+        df = _load_year(year, data_dir, league_id)
         if df is None:
             continue
 

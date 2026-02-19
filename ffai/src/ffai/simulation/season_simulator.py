@@ -3,7 +3,7 @@ import numpy as np
 from pathlib import Path
 import json
 from ffai import get_logger
-from ffai.data.espn_scraper import ESPNDraftScraper
+from ffai.data.espn_scraper import ESPNDraftScraper, load_league_config
 import copy
 logger = get_logger(__name__)
 
@@ -12,7 +12,9 @@ class SeasonSimulator:
         self.draft_results = draft_results
         self.year = year
         # Set data directory relative to this file
-        self.data_dir = Path(__file__).parent / "data/favrefignewton"
+        _cfg = load_league_config()
+        _league_name = _cfg["league"]["league_name"]
+        self.data_dir = Path(__file__).parent.parent / f"data/{_league_name}"
 
         # Load data
         scraper = ESPNDraftScraper()

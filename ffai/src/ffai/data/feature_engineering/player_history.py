@@ -22,27 +22,39 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-FAVREFIGNEWTON_DIR = Path(__file__).parent.parent / "favrefignewton"
-LEAGUE_ID = "770280"
 ALL_SEASONS = list(range(2009, 2025))
+
+
+def _default_espn_data_dir_and_id():
+    from ffai.data.espn_scraper import load_league_config
+    cfg = load_league_config()
+    league_name = cfg["league"]["league_name"]
+    league_id = cfg["league"]["league_id"]
+    data_dir = Path(__file__).parent.parent / league_name
+    return data_dir, league_id
 
 
 def load_espn_season_data(
     years: list[int] | None = None,
-    data_dir: Path = FAVREFIGNEWTON_DIR,
+    data_dir: Path = None,
+    league_id: str = None,
 ) -> pd.DataFrame:
     """
     Load and concatenate ESPN draft_results + player_stats + predraft_values
     for all years, returning a tidy per-(player_id, year) DataFrame with:
         player_id, year, total_points, projected_points, position
     """
+    if data_dir is None or league_id is None:
+        _dir, _id = _default_espn_data_dir_and_id()
+        data_dir = data_dir or _dir
+        league_id = league_id or _id
     years = years or ALL_SEASONS
     frames = []
 
     for year in years:
-        dr_path = data_dir / f"draft_results_{LEAGUE_ID}_{year}.csv"
-        ps_path = data_dir / f"player_stats_{LEAGUE_ID}_{year}.csv"
-        pv_path = data_dir / f"predraft_values_{LEAGUE_ID}_{year}.csv"
+        dr_path = data_dir / f"draft_results_{league_id}_{year}.csv"
+        ps_path = data_dir / f"player_stats_{league_id}_{year}.csv"
+        pv_path = data_dir / f"predraft_values_{league_id}_{year}.csv"
 
         if not dr_path.exists() or not ps_path.exists() or not pv_path.exists():
             logger.warning(f"Missing ESPN data for year {year}, skipping")

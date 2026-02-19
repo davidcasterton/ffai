@@ -2,7 +2,7 @@
 FeatureStore — unified loader for all processed feature CSVs.
 
 Provides per-lookup access with position-year mean imputation for missing players.
-All CSVs are written by scripts/build_features.py and live in data/favrefignewton_processed/.
+All CSVs are written by scripts/build_features.py and live in data/{league_name}_processed/.
 """
 
 import logging
@@ -13,8 +13,15 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-PROCESSED_DIR = Path(__file__).parent / "favrefignewton_processed"
-LEAGUE_ID = "770280"
+
+def _default_store_paths():
+    """Return (processed_dir, league_id) derived from league config."""
+    from ffai.data.espn_scraper import load_league_config
+    cfg = load_league_config()
+    league_name = cfg["league"]["league_name"]
+    league_id = cfg["league"]["league_id"]
+    processed_dir = Path(__file__).parent / f"{league_name}_processed"
+    return processed_dir, league_id
 
 PLAYER_HISTORY_COLS = [
     "pts_3yr_avg", "pts_3yr_std", "pts_1yr_val", "yoy_pct_change",
@@ -47,9 +54,13 @@ class FeatureStore:
 
     def __init__(
         self,
-        processed_dir: Path = PROCESSED_DIR,
-        league_id: str = LEAGUE_ID,
+        processed_dir: Path = None,
+        league_id: str = None,
     ):
+        if processed_dir is None or league_id is None:
+            _default_dir, _default_id = _default_store_paths()
+            processed_dir = processed_dir or _default_dir
+            league_id = league_id or _default_id
         self.processed_dir = Path(processed_dir)
         self.league_id = league_id
 

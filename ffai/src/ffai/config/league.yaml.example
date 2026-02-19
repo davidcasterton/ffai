@@ -1,5 +1,6 @@
 league:
   league_id: "YOUR_LEAGUE_ID"
+  league_name: "your_league_name"
   year: 2024
   budget: 200
 

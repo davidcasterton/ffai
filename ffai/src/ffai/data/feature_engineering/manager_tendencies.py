@@ -19,22 +19,34 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-FAVREFIGNEWTON_DIR = Path(__file__).parent.parent / "favrefignewton"
-LEAGUE_ID = "770280"
 ALL_SEASONS = list(range(2009, 2025))
 POSITIONS = ["QB", "RB", "WR", "TE"]
 
 
+def _default_espn_data_dir_and_id():
+    from ffai.data.espn_scraper import load_league_config
+    cfg = load_league_config()
+    league_name = cfg["league"]["league_name"]
+    league_id = cfg["league"]["league_id"]
+    data_dir = Path(__file__).parent.parent / league_name
+    return data_dir, league_id
+
+
 def load_all_draft_data(
     years: list[int] | None = None,
-    data_dir: Path = FAVREFIGNEWTON_DIR,
+    data_dir: Path = None,
+    league_id: str = None,
 ) -> pd.DataFrame:
     """Load and concatenate draft_results + predraft_values for all years."""
+    if data_dir is None or league_id is None:
+        _dir, _id = _default_espn_data_dir_and_id()
+        data_dir = data_dir or _dir
+        league_id = league_id or _id
     years = years or ALL_SEASONS
     frames = []
     for year in years:
-        dr_path = data_dir / f"draft_results_{LEAGUE_ID}_{year}.csv"
-        pv_path = data_dir / f"predraft_values_{LEAGUE_ID}_{year}.csv"
+        dr_path = data_dir / f"draft_results_{league_id}_{year}.csv"
+        pv_path = data_dir / f"predraft_values_{league_id}_{year}.csv"
         if not dr_path.exists() or not pv_path.exists():
             continue
 
@@ -57,7 +69,8 @@ def load_all_draft_data(
 def build_manager_tendencies(
     draft_df: pd.DataFrame | None = None,
     years: list[int] | None = None,
-    data_dir: Path = FAVREFIGNEWTON_DIR,
+    data_dir: Path = None,
+    league_id: str = None,
 ) -> pd.DataFrame:
     """
     Compute per-manager bidding tendencies from all available draft years.
@@ -71,7 +84,7 @@ def build_manager_tendencies(
         DataFrame with one row per manager_id and tendency columns.
     """
     if draft_df is None:
-        draft_df = load_all_draft_data(years=years, data_dir=data_dir)
+        draft_df = load_all_draft_data(years=years, data_dir=data_dir, league_id=league_id)
 
     if draft_df.empty:
         return pd.DataFrame()

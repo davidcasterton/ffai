@@ -21,10 +21,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import pandas as pd
 import numpy as np
 from scipy import stats as scipy_stats
+from ffai.data.espn_scraper import load_league_config
 
-FAVREFIGNEWTON = Path(__file__).parent.parent / "src/ffai/data/favrefignewton"
-PROCESSED = Path(__file__).parent.parent / "src/ffai/data/favrefignewton_processed"
-LEAGUE_ID = "770280"
+_cfg = load_league_config()
+_league_name = _cfg["league"]["league_name"]
+LEAGUE_ID = _cfg["league"]["league_id"]
+FAVREFIGNEWTON = Path(__file__).parent.parent / f"src/ffai/data/{_league_name}"
+PROCESSED = Path(__file__).parent.parent / f"src/ffai/data/{_league_name}_processed"
 POSITIONS = ["QB", "RB", "WR", "TE"]
 ALL_YEARS = list(range(2009, 2025))
 
@@ -190,7 +193,7 @@ def main() -> None:
     print("Loading all draft + season data...")
     df = load_all_draft_data()
     if df.empty:
-        print("No data found. Check favrefignewton/ directory.")
+        print(f"No data found. Check {FAVREFIGNEWTON}/ directory.")
         return
     print(f"  Loaded {len(df):,} picks across {df['year'].nunique()} seasons")
 

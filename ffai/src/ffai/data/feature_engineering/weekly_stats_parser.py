@@ -15,14 +15,22 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-FAVREFIGNEWTON_DIR = Path(__file__).parent.parent / "favrefignewton"
-LEAGUE_ID = "770280"
 WEEKLY_SEASONS = list(range(2019, 2025))
+
+
+def _default_espn_data_dir_and_id():
+    from ffai.data.espn_scraper import load_league_config
+    cfg = load_league_config()
+    league_name = cfg["league"]["league_name"]
+    league_id = cfg["league"]["league_id"]
+    data_dir = Path(__file__).parent.parent / league_name
+    return data_dir, league_id
 
 
 def load_weekly_fantasy_points(
     years: list[int] | None = None,
-    data_dir: Path = FAVREFIGNEWTON_DIR,
+    data_dir: Path = None,
+    league_id: str = None,
 ) -> pd.DataFrame:
     """
     Load ESPN weekly stats and return a tidy DataFrame:
@@ -30,12 +38,16 @@ def load_weekly_fantasy_points(
 
     Only loads years >= 2019 (earlier files exist but JSON stats field is sparse).
     """
+    if data_dir is None or league_id is None:
+        _dir, _id = _default_espn_data_dir_and_id()
+        data_dir = data_dir or _dir
+        league_id = league_id or _id
     years = years or WEEKLY_SEASONS
     years = [y for y in years if y >= 2019]
 
     frames = []
     for year in years:
-        path = data_dir / f"weekly_stats_{LEAGUE_ID}_{year}.csv"
+        path = data_dir / f"weekly_stats_{league_id}_{year}.csv"
         if not path.exists():
             logger.warning(f"Missing weekly stats file: {path}")
             continue

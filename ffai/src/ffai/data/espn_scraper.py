@@ -41,10 +41,18 @@ def get_credentials(config_path: Optional[Path] = None) -> Tuple[str, str, str]:
     return league_id, swid, espn_s2
 
 
+def get_league_name(config_path: Optional[Path] = None) -> str:
+    """Return league_name from config file."""
+    config = load_league_config(config_path)
+    return config["league"]["league_name"]
+
+
 class ESPNDraftScraper:
     def __init__(self, league_id: str = None, year: int = None, config_path: Path = None):
         """Initialize scraper. Credentials loaded from config/league.yaml."""
-        self.raw_data_dir = Path(__file__).parent / "raw"
+        cfg = load_league_config(config_path)
+        league_name = cfg["league"]["league_name"]
+        self.raw_data_dir = Path(__file__).parent / league_name
         self.raw_data_dir.mkdir(parents=True, exist_ok=True)
 
         cfg_league_id, self.swid, self.espn_s2 = get_credentials(config_path)
