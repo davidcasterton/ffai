@@ -282,26 +282,7 @@ class FantasyDataPreprocessor:
         self.position_encoder.fit(POSITIONS + ['UNKNOWN'])
         self._fitted = True
 
-        # Fit scaler on first year's numerical features
-        first_year, first_draft, first_stats = year_data[0]
-        first_draft = first_draft.copy()
-        first_stats = first_stats.copy()
-        first_merged = pd.merge(first_draft.assign(player_id=first_draft['player_id'].astype(str)),
-                                first_stats.assign(player_id=first_stats['player_id'].astype(str)),
-                                on='player_id', how='left')
-        first_merged['total_points'] = first_merged['total_points'].fillna(0)
-        first_merged['bid_amount'] = first_merged['bid_amount'].fillna(1)
-        first_merged['pos_scarcity_rank'] = first_merged.groupby('position')['total_points'].rank(ascending=False)
-        first_merged['points_per_dollar'] = first_merged['total_points'] / first_merged['bid_amount'].clip(lower=1)
-        year_norm = float(first_year - 2009) / 15.0
-        numerical_sample = np.column_stack([
-            first_merged['bid_amount'].values.astype(np.float32),
-            first_merged.get('adp', pd.Series(0, index=first_merged.index)).fillna(0).values.astype(np.float32),
-            np.full(len(first_merged), year_norm, dtype=np.float32),
-            first_merged['pos_scarcity_rank'].values.astype(np.float32),
-            first_merged['points_per_dollar'].fillna(0).values.astype(np.float32),
-        ])
-        self.scaler.fit(numerical_sample)
+        # Scaler is fit on first year inside process_draft_data (see line with hasattr check)
 
         # Second pass: process each year
         all_results = [[], [], [], [], []]

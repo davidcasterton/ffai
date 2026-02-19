@@ -54,6 +54,7 @@ ffai/
 │   ├── analyze_strategy.py     # exploratory: position ROI, manager tendencies, projection bias
 │   ├── train_value_model.py    # Stage 4: train supervised value model
 │   ├── train_puffer.py         # Stage 5: PufferLib PPO curriculum training
+│   ├── simulate_draft.py       # post-training: full draft simulation with transcript output
 │   ├── advisory_draft.py       # live draft advisory mode
 │   └── autonomous_draft.py     # autonomous ESPN draft room control
 └── src/ffai/
@@ -212,6 +213,28 @@ Season simulator runs every episode. Checkpoint saved to `checkpoints/puffer/pha
 
 ## Usage
 
+### Simulate a draft (post-training evaluation)
+
+Run a full 12-team auction draft simulation and print a play-by-play transcript plus final rosters. Uses per-manager behavioral models from historical bid data for all opponent teams.
+
+```bash
+# All-heuristic baseline — per-manager opponents, no RL agent
+.venv/bin/python ffai/scripts/simulate_draft.py --year 2024
+
+# Inject a trained RL model as Team 1 (or any team slot)
+.venv/bin/python ffai/scripts/simulate_draft.py \
+  --year 2024 \
+  --rl-model-path checkpoints/puffer/phase3_final.pt \
+  --rl-team "Team 1"
+
+# Save output to a file
+.venv/bin/python ffai/scripts/simulate_draft.py --year 2024 \
+  --rl-model-path checkpoints/puffer/phase3_final.pt \
+  --output results/sim_2024.txt
+```
+
+The transcript shows each nomination, winner, and final price. The roster section shows every team's picks with projected points and spend. Verification checks: 168 rows in the transcript, all 12 teams with full rosters, total spend ≤ $200 per team.
+
 ### Advisory mode
 
 The agent monitors the live draft and prints bidding recommendations. You control the draft; the agent advises.
@@ -239,3 +262,4 @@ The browser window stays visible (`headless=False`) so you can monitor and inter
 - `plans/2025-02-18_initial-design.md` — original RL-only design
 - `plans/2026-02-18_hybrid-ml-redesign.md` — hybrid supervised + PPO architecture
 - `plans/2026-02-18_feature-engineering-and-data-expansion.md` — nflverse integration, 72-dim state, feature store
+- `plans/2026-02-18_draft-simulation-and-opponent-modeling.md` — simulate_draft.py, per-manager opponent modeling, self-play research synthesis

@@ -24,7 +24,7 @@ import gymnasium
 
 import pufferlib
 
-from ffai.simulation.auction_draft_simulator import AuctionDraftSimulator
+from ffai.simulation.auction_draft_simulator import AuctionDraftSimulator, _build_team_manager_map
 from ffai.rl.state_builder import build_state, STATE_DIM
 from ffai.rl.reward import terminal_reward, normalize_terminal_reward
 
@@ -145,6 +145,9 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
 
         sim.feature_store = self._feature_store
         sim._manager_tendencies = self._mgr_tend
+
+        # Build "Team N" → manager_id mapping (same logic as AuctionDraftSimulator.__init__)
+        sim._team_manager_map = _build_team_manager_map(draft_df)
 
         return sim
 

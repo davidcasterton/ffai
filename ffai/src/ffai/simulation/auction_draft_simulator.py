@@ -27,6 +27,32 @@ except ImportError:
 logger = get_logger(__name__)
 
 
+def _build_team_manager_map(draft_df: pd.DataFrame) -> dict:
+    """
+    Map generic simulator slot names ("Team 1"…"Team 12") to manager_id values.
+
+    Teams are assigned slot numbers in the order their first pick appears in
+    draft_df (sorted by pick_number). This preserves nomination-order semantics
+    without requiring changes to initialize_teams().
+    """
+    if "manager_id" not in draft_df.columns or "team_name" not in draft_df.columns:
+        return {}
+    # Sort by pick_number when available so slot 1 = team that nominated first
+    if "pick_number" in draft_df.columns:
+        df_sorted = draft_df.sort_values("pick_number")
+    else:
+        df_sorted = draft_df
+    seen: dict = {}
+    slot = 1
+    for _, row in df_sorted.iterrows():
+        t = str(row["team_name"])
+        if t not in seen:
+            seen[t] = f"Team {slot}"
+            slot += 1
+    return {v: str(draft_df.loc[draft_df["team_name"] == k, "manager_id"].iloc[0])
+            for k, v in seen.items()}
+
+
 class InvalidRosterException(Exception):
     """Exception raised when a team's roster is invalid."""
     def __init__(self, team_name: str, message: str):
@@ -69,6 +95,11 @@ class AuctionDraftSimulator:
                     reader = csv.DictReader(f)
                     for row in reader:
                         self._manager_tendencies[row["manager_id"]] = row
+
+        # Build "Team N" → manager_id mapping for per-manager opponent modeling.
+        # The simulator uses generic slot names ("Team 1"…"Team 12"); we assign
+        # managers in the order unique teams first appear in draft_df (by pick_number).
+        self._team_manager_map: dict[str, str] = _build_team_manager_map(self.draft_df)
 
         self.teams: dict = self.initialize_teams()
         self.nomination_order: list = list(self.teams.keys())
@@ -150,11 +181,17 @@ class AuctionDraftSimulator:
     # Main simulation loop
     # ------------------------------------------------------------------
 
-    def simulate_draft(self):
-        """Run auction draft simulation."""
+    def simulate_draft(self, transcript_callback=None):
+        """Run auction draft simulation.
+
+        Args:
+            transcript_callback: optional callable(pick_num, nominator, player, winner, bid)
+                called after each player is won. Used by simulate_draft.py for transcript output.
+        """
         current_nominator_idx: int = 0
         round_num: int = 0
         total_reward: float = 0
+        pick_num: int = 0
 
         while not self.all_rosters_complete():
             round_num += 1
@@ -226,6 +263,10 @@ class AuctionDraftSimulator:
 
                 logger.debug(f"{current_winner} wins {nominated_player['name']} for ${current_bid}")
                 self.add_player_to_roster(current_winner, nominated_player, current_bid)
+                pick_num += 1
+
+                if transcript_callback is not None:
+                    transcript_callback(pick_num, nominating_team_name, nominated_player, current_winner, current_bid)
 
                 # Mid-draft reward for RL team (stored for PPO buffer externally)
                 if current_winner == self.rl_team_name and self.rl_model:
@@ -329,32 +370,39 @@ class AuctionDraftSimulator:
         """
         Estimate the maximum an opponent is willing to pay for a player.
 
-        If manager_tendencies data is available, scales by the manager's historical
-        bid-per-projected-point at this position. Otherwise falls back to
-        auction_value * (1 ± 0.10) as before.
+        Uses per-manager bid_per_proj_pt from manager_tendencies when available
+        (via _team_manager_map). Falls back to league-average tendencies, then to
+        auction_value * (1 ± 0.10).
         """
         pos = player.get('position', '').lower()
         proj_pts = float(player.get('projected_points', 0.0))
         fallback_value = float(player.get('auction_value', 0))
+
+        # Try per-manager profile first
+        manager_id = self._team_manager_map.get(team_name)
+        tend: dict = {}
+        if manager_id and self._manager_tendencies:
+            tend = self._manager_tendencies.get(manager_id, {})
+        elif self._manager_tendencies:
+            # Fall back to league-average across all managers
+            tend = {
+                col: float(np.mean([
+                    float(r.get(col, 0) or 0)
+                    for r in self._manager_tendencies.values()
+                    if r.get(col)
+                ]))
+                for col in [
+                    'bid_per_proj_pt_rb', 'bid_per_proj_pt_wr',
+                    'bid_per_proj_pt_qb', 'bid_per_proj_pt_te',
+                ]
+            }
+
+        bpppt = float(tend.get(f'bid_per_proj_pt_{pos}', 0) or 0)
+        if bpppt > 0 and proj_pts > 0:
+            noise = np.random.normal(0, bpppt * 0.15)
+            return max(1.0, proj_pts * (bpppt + noise))
+
         randomness = np.random.uniform(-0.1, 0.1)
-
-        # Look up manager_id for this team
-        # Manager tendencies keyed by manager_id; we don't have it in team dict,
-        # so fall back to heuristic unless we have a team→manager mapping.
-        if self._manager_tendencies and proj_pts > 0:
-            # Try to find manager for this team from the loaded manager tendencies
-            # (manager_tendencies indexed by manager_id; team names don't map directly)
-            # Use the heuristic based on position-level bid_per_proj_pt averages
-            bpppt_values = [
-                float(row.get(f"bid_per_proj_pt_{pos}", 0) or 0)
-                for row in self._manager_tendencies.values()
-                if row.get(f"bid_per_proj_pt_{pos}")
-            ]
-            if bpppt_values:
-                avg_bpppt = float(np.mean(bpppt_values))
-                noise = np.random.normal(0, avg_bpppt * 0.15)
-                return max(1.0, proj_pts * (avg_bpppt + noise))
-
         return round(fallback_value * (1 + randomness))
 
     def _calculate_mid_draft_reward(self, player: dict, bid_amount: int) -> float:

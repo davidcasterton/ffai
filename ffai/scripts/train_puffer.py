@@ -71,7 +71,7 @@ PHASE_CONFIGS = {
         "total_timesteps": 1_000_000,
         "enable_season_sim": True,
         "season_sim_interval": 1,
-        "num_envs": 8,
+        "num_envs": 6,
         "description": "full season-sim every episode",
     },
 }

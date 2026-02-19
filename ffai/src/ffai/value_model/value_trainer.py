@@ -69,7 +69,7 @@ class ValueModelTrainer:
 
         self.optimizer = optim.Adam(model.parameters(), lr=learning_rate)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, patience=5, factor=0.5, verbose=True
+            self.optimizer, patience=5, factor=0.5
         )
         self.points_loss_fn = nn.MSELoss()
         self.dollar_loss_fn = nn.MSELoss()
