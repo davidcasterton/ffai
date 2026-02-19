@@ -21,6 +21,16 @@ PufferLib is installed from source at `/home/dave/code/public/PufferLib/` (requi
 
 All three directories are gitignored (local only). When adding a processing step, write a script that reads from `favrefignewton/` or `nflverse/` and writes to `favrefignewton_processed/` so the transformation is auditable.
 
+## README Maintenance
+
+Keep `README.md` up to date whenever you make changes that affect:
+- The training pipeline (new stages, changed script names or arguments)
+- The directory structure (new files, renamed paths)
+- The architecture (new models, state dimensions, data sources)
+- Setup instructions (new dependencies, environment steps)
+
+Update the README as part of the same commit as the code change — don't leave it for later.
+
 ## Plans
 
 Whenever a plan is created for this project, save it as a markdown file in the `plans/` directory using the format:
