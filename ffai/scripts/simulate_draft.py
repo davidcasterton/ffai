@@ -160,12 +160,12 @@ def _run_simulation(
     if rl_bidder:
         _orig_opponent_max_bid = sim._opponent_max_bid
 
-        def _patched_opponent_max_bid(team_name: str, player: dict) -> float:
+        def _patched_opponent_max_bid(team_name: str, player: dict, current_bid: float = 0.0) -> float:
             if team_name == rl_team:
                 state = sim.get_state()
                 budget = float(sim.teams[rl_team]["current_budget"])
                 return rl_bidder.get_max_bid(state, player, 1, budget)
-            return _orig_opponent_max_bid(team_name, player)
+            return _orig_opponent_max_bid(team_name, player, current_bid)
 
         sim._opponent_max_bid = _patched_opponent_max_bid  # type: ignore[method-assign]
 
