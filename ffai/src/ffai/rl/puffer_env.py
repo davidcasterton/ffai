@@ -109,7 +109,7 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
         sim.rl_team_name = "Team 1"
         sim.rl_model = None
         sim.draft_completed = False
-        sim.data_dir = Path(__file__).parent.parent / "data/raw"
+        sim.data_dir = Path(__file__).parent.parent / "data/favrefignewton"
 
         # Inject cached data
         sim.draft_df = draft_df
@@ -123,6 +123,28 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
         sim.nomination_order = list(sim.teams.keys())
         sim.available_players = sim.initialize_available_players()
         sim.players_drafted = []
+
+        # Feature store and manager tendencies (set once, reused across episodes)
+        if not hasattr(self, '_feature_store'):
+            try:
+                from ffai.data.feature_store import FeatureStore
+                import csv
+                fs = FeatureStore()
+                mgr_tend = {}
+                mt_path = Path(__file__).parent.parent / "data/processed/manager_tendencies_770280.csv"
+                if mt_path.exists():
+                    with open(mt_path) as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            mgr_tend[row["manager_id"]] = row
+                self._feature_store = fs
+                self._mgr_tend = mgr_tend
+            except Exception:
+                self._feature_store = None
+                self._mgr_tend = {}
+
+        sim.feature_store = self._feature_store
+        sim._manager_tendencies = self._mgr_tend
 
         return sim
 
@@ -147,7 +169,14 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
         return obs
 
     def _build_obs(self, state: dict, player: dict, current_bid: float) -> np.ndarray:
-        return build_state(state, current_player=player, current_bid=current_bid).numpy()
+        feature_store = getattr(self._sim, 'feature_store', None)
+        return build_state(
+            state,
+            current_player=player,
+            current_bid=current_bid,
+            feature_store=feature_store,
+            year=self.year,
+        ).numpy()
 
     # ------------------------------------------------------------------
     # PufferEnv interface

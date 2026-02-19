@@ -43,8 +43,8 @@ checkpoints*/
 plots/
 logs/
 *.log
-ffai/data/raw/
-ffai/data/processed/
+ffai/src/ffai/data/favrefignewton/
+ffai/src/ffai/data/processed/
 *.csv
 *.json
 

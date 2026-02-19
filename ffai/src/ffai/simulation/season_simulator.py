@@ -12,7 +12,7 @@ class SeasonSimulator:
         self.draft_results = draft_results
         self.year = year
         # Set data directory relative to this file
-        self.data_dir = Path(__file__).parent / "data/raw"
+        self.data_dir = Path(__file__).parent / "data/favrefignewton"
 
         # Load data
         scraper = ESPNDraftScraper()

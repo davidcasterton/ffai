@@ -3,6 +3,22 @@ Data preprocessor for fantasy football auction draft training.
 
 Cherry-picks encoding/scaling from favrefignewton and adds PAR/VORP calculations
 for use as targets in the supervised PlayerValueModel.
+
+Numerical feature vector (14 dims):
+  0: projected_pts_norm        = projected_points / 400.0
+  1: adp_round                 = adp (draft round proxy)
+  2: year_norm                 = (year - 2009) / 15.0
+  3: pos_scarcity_rank         = within-year rank by total_points (normalized)
+  4: proj_ratio_3yr_avg        from player_history (0 if missing)
+  5: proj_bias_1yr_norm        = proj_bias_1yr / 400.0
+  6: pts_3yr_avg_norm          = pts_3yr_avg / 400.0
+  7: pts_1yr_val_norm          = pts_1yr_val / 400.0
+  8: yoy_pct_change            clipped [-1, 1]
+  9: years_in_league_norm      = years_in_league / 10.0
+  10: weekly_pts_cv            0 if pre-2019 or missing
+  11: floor_pts_norm           = floor_pts / 40.0
+  12: targets_per_game_norm    = targets_per_game / 10.0
+  13: snap_pct_1yr             0 if missing
 """
 
 import pandas as pd
@@ -134,14 +150,22 @@ class FantasyDataPreprocessor:
         draft_df: pd.DataFrame,
         stats_df: pd.DataFrame,
         year: Optional[int] = None,
+        feature_store=None,
     ) -> Tuple[np.ndarray, ...]:
         """
         Process raw draft + stats data into arrays for model training.
 
+        Args:
+            draft_df: ESPN draft results DataFrame
+            stats_df: ESPN player stats DataFrame
+            year: season year (used for year_norm and feature_store lookups)
+            feature_store: optional FeatureStore instance for 14-dim features;
+                           if None, extended features are zeroed out
+
         Returns:
             player_ids: (N,) int array of player embedding indices
             position_ids: (N,) int array of position embedding indices
-            numerical_features: (N, 5) float array
+            numerical_features: (N, 14) float array
             target_points: (N,) float array — actual season points
             target_dollar: (N,) float array — VORP-derived fair auction value
         """
@@ -189,18 +213,37 @@ class FantasyDataPreprocessor:
 
         # Position scarcity rank within this dataset (lower = more scarce)
         merged['pos_scarcity_rank'] = merged.groupby('position')['total_points'].rank(ascending=False)
-
-        # Points per dollar (with bid_amount from actual draft)
-        merged['points_per_dollar'] = merged['total_points'] / (merged['bid_amount'].clip(lower=1))
+        # Normalize scarcity rank to [0,1]
+        merged['pos_scarcity_rank_norm'] = merged['pos_scarcity_rank'] / merged.groupby('position')['pos_scarcity_rank'].transform('max').clip(lower=1)
 
         year_norm = float(year - 2009) / 15.0 if year else 0.0
 
+        # ------------------------------------------------------------------
+        # Extended features from FeatureStore (dims 4-13)
+        # ------------------------------------------------------------------
+        ext = np.zeros((len(merged), 10), dtype=np.float32)
+        if feature_store is not None and feature_store.loaded:
+            for i, (_, row) in enumerate(merged.iterrows()):
+                feats = feature_store.get_player_features(
+                    str(row['player_id']), year or 0, position=str(row.get('position', ''))
+                )
+                ext[i, 0] = float(feats.get('proj_ratio_3yr_avg', 0.0) or 0.0)
+                ext[i, 1] = float((feats.get('proj_bias_1yr', 0.0) or 0.0)) / 400.0
+                ext[i, 2] = float((feats.get('pts_3yr_avg', 0.0) or 0.0)) / 400.0
+                ext[i, 3] = float((feats.get('pts_1yr_val', 0.0) or 0.0)) / 400.0
+                ext[i, 4] = float(np.clip(feats.get('yoy_pct_change', 0.0) or 0.0, -1.0, 1.0))
+                ext[i, 5] = float(min(1.0, (feats.get('years_in_league', 0.0) or 0.0) / 10.0))
+                ext[i, 6] = float(feats.get('weekly_pts_cv', 0.0) or 0.0)
+                ext[i, 7] = float((feats.get('floor_pts', 0.0) or 0.0)) / 40.0
+                ext[i, 8] = float((feats.get('targets_per_game', 0.0) or 0.0)) / 10.0
+                ext[i, 9] = float(feats.get('snap_pct_1yr', 0.0) or 0.0)
+
         numerical = np.column_stack([
-            merged['bid_amount'].fillna(1).values.astype(np.float32),          # historical bid
+            (merged.get('projected_points', pd.Series(0, index=merged.index)).fillna(0).values.astype(np.float32) / 400.0),
             merged.get('adp', pd.Series(0, index=merged.index)).fillna(0).values.astype(np.float32),
             np.full(len(merged), year_norm, dtype=np.float32),
-            merged['pos_scarcity_rank'].values.astype(np.float32),
-            merged['points_per_dollar'].fillna(0).values.astype(np.float32),
+            merged['pos_scarcity_rank_norm'].values.astype(np.float32),
+            ext,  # dims 4-13
         ])
 
         # Fit scaler on first call
@@ -219,6 +262,7 @@ class FantasyDataPreprocessor:
     def process_multi_year(
         self,
         year_data: List[Tuple[int, pd.DataFrame, pd.DataFrame]],
+        feature_store=None,
     ) -> Tuple[np.ndarray, ...]:
         """
         Process multiple years of data. Fits encoders on the full corpus first.
@@ -262,7 +306,7 @@ class FantasyDataPreprocessor:
         # Second pass: process each year
         all_results = [[], [], [], [], []]
         for year, draft_df, stats_df in year_data:
-            results = self.process_draft_data(draft_df, stats_df, year=year)
+            results = self.process_draft_data(draft_df, stats_df, year=year, feature_store=feature_store)
             for i, arr in enumerate(results):
                 all_results[i].append(arr)
 

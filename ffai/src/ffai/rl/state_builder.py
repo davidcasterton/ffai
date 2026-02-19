@@ -1,7 +1,7 @@
 """
 Centralized state construction for the PPO agent.
 
-State vector layout (~56 dims):
+State vector layout (72 dims):
   [0:4]   Budget context       (4)  rl_budget/200, budget_per_slot, draft_progress, remaining_slots/14
   [4:15]  Opponent pressure    (11) opponent_budget_fractions (budget/200 for each opponent)
   [15:27] My roster state      (12) per-position: [slots_filled_fraction, points_accumulated/500]
@@ -11,8 +11,16 @@ State vector layout (~56 dims):
   [45:53] Current player       (8)  value_model_points/400, value_model_dollar/80, PAR/200, VORP_dollar/80,
                                     position_onehot (4: RB, WR, QB, other)
   [53:56] Bid context          (3)  current_bid/200, current_bid/fair_value, min_needed_budget/200
+  [56:62] Player history       (6)  pts_3yr_avg_norm, proj_ratio_3yr_avg, yoy_pct_change,
+                                    weekly_pts_cv, floor_pts_norm, years_in_league_norm
+  [62:66] Position strategy    (4)  winning_budget_share, roi_3yr_avg, proj_accuracy_ratio,
+                                    scarcity_historical
+  [66:72] Opponent tendencies  (6)  aggregated over top-3 budget opponents:
+                                    avg_rb_budget_share, avg_wr_budget_share,
+                                    avg_high_bid_rate, avg_dollar_one_rate,
+                                    avg_bid_per_proj_pt_rb, avg_bid_per_proj_pt_wr
 
-Total: 56 dims
+Total: 72 dims
 """
 
 import numpy as np
@@ -21,7 +29,7 @@ from typing import Dict, List, Optional, Any
 
 POSITIONS = ['QB', 'RB', 'WR', 'TE', 'D/ST', 'K']
 NUM_POSITIONS = len(POSITIONS)
-STATE_DIM = 56
+STATE_DIM = 72
 
 BUDGET_MAX = 200.0
 POINTS_MAX = 400.0          # max projected season points any player could have
@@ -44,17 +52,21 @@ def build_state(
     sim_state: Dict[str, Any],
     current_player: Optional[Dict[str, Any]] = None,
     current_bid: float = 0.0,
+    feature_store=None,
+    year: int = 2024,
 ) -> torch.Tensor:
     """
-    Build a 56-dim state tensor from the simulation state dict.
+    Build a 72-dim state tensor from the simulation state dict.
 
     Args:
         sim_state: dict returned by AuctionDraftSimulator.get_state()
         current_player: player dict being currently bid on (can be None during nomination)
         current_bid: current highest bid amount (0 if nominating)
+        feature_store: optional FeatureStore instance for dims 56-71
+        year: season year for feature_store lookups
 
     Returns:
-        state tensor of shape (56,)
+        state tensor of shape (72,)
     """
     features = np.zeros(STATE_DIM, dtype=np.float32)
     idx = 0
@@ -153,5 +165,60 @@ def build_state(
     features[53] = current_bid / BUDGET_MAX
     features[54] = current_bid / max(1.0, fair_value)  # ratio of bid to fair value
     features[55] = min(1.0, min_needed / BUDGET_MAX)
+    idx = 56  # idx = 56
+
+    # ------------------------------------------------------------------
+    # [56:62] Player history (6 features) — requires feature_store
+    # ------------------------------------------------------------------
+    if feature_store is not None and current_player is not None:
+        pid = str(current_player.get('player_id', ''))
+        pos = current_player.get('position', '')
+        ph = feature_store.get_player_features(pid, year, position=pos)
+
+        features[56] = float(ph.get('pts_3yr_avg', 0.0) or 0.0) / POINTS_MAX
+        features[57] = float(np.clip(ph.get('proj_ratio_3yr_avg', 1.0) or 1.0, 0.0, 3.0)) / 3.0
+        features[58] = float(np.clip(ph.get('yoy_pct_change', 0.0) or 0.0, -1.0, 1.0))
+        features[59] = float(np.clip(ph.get('weekly_pts_cv', 0.0) or 0.0, 0.0, 3.0)) / 3.0
+        features[60] = float(ph.get('floor_pts', 0.0) or 0.0) / 40.0
+        features[61] = float(min(1.0, (ph.get('years_in_league', 0.0) or 0.0) / 10.0))
+    idx = 62  # idx = 62
+
+    # ------------------------------------------------------------------
+    # [62:66] Position strategy (4 features)
+    # ------------------------------------------------------------------
+    if feature_store is not None and current_player is not None:
+        pos = current_player.get('position', '')
+        ps = feature_store.get_position_strategy(pos, year)
+
+        features[62] = float(ps.get('winning_budget_share', 0.0) or 0.0)
+        features[63] = float(np.clip(ps.get('roi_mean', 0.0) or 0.0, 0.0, 20.0)) / 20.0
+        features[64] = float(np.clip(ps.get('proj_accuracy_ratio', 1.0) or 1.0, 0.0, 3.0)) / 3.0
+        features[65] = float(ps.get('budget_share_pct', 0.0) or 0.0)
+    idx = 66  # idx = 66
+
+    # ------------------------------------------------------------------
+    # [66:72] Opponent tendencies (6 features, top-3 budget opponents)
+    # ------------------------------------------------------------------
+    if feature_store is not None:
+        opponent_tendencies = sim_state.get('opponent_tendencies', [])
+        if opponent_tendencies:
+            rb_shares, wr_shares = [], []
+            high_bid_rates, dollar_one_rates = [], []
+            rb_efficiencies, wr_efficiencies = [], []
+
+            for tend in opponent_tendencies[:3]:
+                rb_shares.append(float(tend.get('rb_budget_share', 0.0) or 0.0))
+                wr_shares.append(float(tend.get('wr_budget_share', 0.0) or 0.0))
+                high_bid_rates.append(float(tend.get('high_bid_rate', 0.0) or 0.0))
+                dollar_one_rates.append(float(tend.get('dollar_one_rate', 0.0) or 0.0))
+                rb_efficiencies.append(float(tend.get('bid_per_proj_pt_rb', 0.0) or 0.0))
+                wr_efficiencies.append(float(tend.get('bid_per_proj_pt_wr', 0.0) or 0.0))
+
+            features[66] = float(np.mean(rb_shares)) if rb_shares else 0.0
+            features[67] = float(np.mean(wr_shares)) if wr_shares else 0.0
+            features[68] = float(np.mean(high_bid_rates)) if high_bid_rates else 0.0
+            features[69] = float(np.mean(dollar_one_rates)) if dollar_one_rates else 0.0
+            features[70] = float(np.clip(np.mean(rb_efficiencies), 0.0, 1.0)) if rb_efficiencies else 0.0
+            features[71] = float(np.clip(np.mean(wr_efficiencies), 0.0, 1.0)) if wr_efficiencies else 0.0
 
     return torch.from_numpy(features)

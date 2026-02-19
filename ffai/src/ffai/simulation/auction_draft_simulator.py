@@ -18,6 +18,12 @@ from ffai.data.espn_scraper import ESPNDraftScraper
 import copy
 import logging
 
+try:
+    from ffai.data.feature_store import FeatureStore
+    _FEATURE_STORE_AVAILABLE = True
+except ImportError:
+    _FEATURE_STORE_AVAILABLE = False
+
 logger = get_logger(__name__)
 
 
@@ -30,17 +36,39 @@ class InvalidRosterException(Exception):
 
 
 class AuctionDraftSimulator:
-    def __init__(self, year, budget=200, rl_team="Team 1", rl_model=None):
+    def __init__(self, year, budget=200, rl_team="Team 1", rl_model=None, feature_store=None):
         self.year = year
         self.budget = budget
         self.rl_team_name = rl_team
         self.rl_model = rl_model
         self.draft_completed: bool = False
 
-        self.data_dir = Path(__file__).parent.parent / "data/raw"
+        self.data_dir = Path(__file__).parent.parent / "data/favrefignewton"
 
         scraper = ESPNDraftScraper()
         self.draft_df, self.stats_df, self.weekly_df, self.predraft_df, self.settings = scraper.load_or_fetch_data(self.year)
+
+        # Feature store for enriched opponent model and state dims 56-71
+        if feature_store is not None:
+            self.feature_store = feature_store
+        elif _FEATURE_STORE_AVAILABLE:
+            try:
+                self.feature_store = FeatureStore()
+            except Exception:
+                self.feature_store = None
+        else:
+            self.feature_store = None
+
+        # Load manager tendencies for use in opponent bidding heuristic
+        self._manager_tendencies: dict = {}
+        if self.feature_store is not None:
+            mt_path = Path(__file__).parent.parent / "data/processed/manager_tendencies_770280.csv"
+            if mt_path.exists():
+                import csv
+                with open(mt_path) as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        self._manager_tendencies[row["manager_id"]] = row
 
         self.teams: dict = self.initialize_teams()
         self.nomination_order: list = list(self.teams.keys())
@@ -184,8 +212,7 @@ class AuctionDraftSimulator:
                                 self.teams[team_name]["current_budget"]
                             )
                         else:
-                            randomness = np.random.uniform(-0.1, 0.1)
-                            max_bid = round(nominated_player.get('auction_value', 0) * (1 + randomness))
+                            max_bid = self._opponent_max_bid(team_name, nominated_player)
 
                         if max_bid > current_bid:
                             highest_bid = current_bid + 1
@@ -273,8 +300,7 @@ class AuctionDraftSimulator:
                             max_bid = yield (state, nominated_player, current_bid)
                             self._step_reward = 0.0
                         else:
-                            randomness = np.random.uniform(-0.1, 0.1)
-                            max_bid = round(nominated_player.get('auction_value', 0) * (1 + randomness))
+                            max_bid = self._opponent_max_bid(team_name, nominated_player)
 
                         if max_bid > current_bid:
                             highest_bid = current_bid + 1
@@ -298,6 +324,38 @@ class AuctionDraftSimulator:
                 break
 
             current_nominator_idx = (current_nominator_idx + 1) % len(self.nomination_order)
+
+    def _opponent_max_bid(self, team_name: str, player: dict) -> float:
+        """
+        Estimate the maximum an opponent is willing to pay for a player.
+
+        If manager_tendencies data is available, scales by the manager's historical
+        bid-per-projected-point at this position. Otherwise falls back to
+        auction_value * (1 ± 0.10) as before.
+        """
+        pos = player.get('position', '').lower()
+        proj_pts = float(player.get('projected_points', 0.0))
+        fallback_value = float(player.get('auction_value', 0))
+        randomness = np.random.uniform(-0.1, 0.1)
+
+        # Look up manager_id for this team
+        # Manager tendencies keyed by manager_id; we don't have it in team dict,
+        # so fall back to heuristic unless we have a team→manager mapping.
+        if self._manager_tendencies and proj_pts > 0:
+            # Try to find manager for this team from the loaded manager tendencies
+            # (manager_tendencies indexed by manager_id; team names don't map directly)
+            # Use the heuristic based on position-level bid_per_proj_pt averages
+            bpppt_values = [
+                float(row.get(f"bid_per_proj_pt_{pos}", 0) or 0)
+                for row in self._manager_tendencies.values()
+                if row.get(f"bid_per_proj_pt_{pos}")
+            ]
+            if bpppt_values:
+                avg_bpppt = float(np.mean(bpppt_values))
+                noise = np.random.normal(0, avg_bpppt * 0.15)
+                return max(1.0, proj_pts * (avg_bpppt + noise))
+
+        return round(fallback_value * (1 + randomness))
 
     def _calculate_mid_draft_reward(self, player: dict, bid_amount: int) -> float:
         """
@@ -560,6 +618,22 @@ class AuctionDraftSimulator:
 
         total_needs = sum(position_needs.values())
 
+        # Opponent tendencies for dims 66-71 (top-3 opponents by remaining budget)
+        opponent_tendencies = []
+        if self._manager_tendencies:
+            opp_budgets_sorted = sorted(
+                [(t, self.teams[t]["current_budget"]) for t in self.teams if t != self.rl_team_name],
+                key=lambda x: x[1], reverse=True
+            )
+            # We don't have team→manager_id mapping in the sim, so use league averages
+            # for all opponents (same values, but still encodes league tendencies)
+            avg_tendency = {}
+            for col in ["rb_budget_share", "wr_budget_share", "high_bid_rate",
+                        "dollar_one_rate", "bid_per_proj_pt_rb", "bid_per_proj_pt_wr"]:
+                vals = [float(row.get(col, 0) or 0) for row in self._manager_tendencies.values()]
+                avg_tendency[col] = float(np.mean(vals)) if vals else 0.0
+            opponent_tendencies = [avg_tendency] * min(3, len(opp_budgets_sorted))
+
         return {
             'rl_team_budget': rl_team["current_budget"],
             'opponent_budgets': [self.teams[t]["current_budget"] for t in self.teams if t != self.rl_team_name],
@@ -578,6 +652,7 @@ class AuctionDraftSimulator:
             'total_team_points': sum(
                 p["projected_points"] for p in rl_team["roster"].values() if p
             ),
+            'opponent_tendencies': opponent_tendencies,
         }
 
     def get_points_per_slot(self, team_name: str, num_slots: int) -> list:

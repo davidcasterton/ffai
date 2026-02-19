@@ -8,7 +8,7 @@ Outputs:
 Architecture:
   player_embedding:    Embedding(num_players+1, 256)
   position_embedding:  Embedding(num_positions+1, 64)
-  numerical_encoder:   MLP([5] -> [128])  # projected_pts, adp, year_norm, scarcity_rank, pts_per_dollar
+  numerical_encoder:   MLP([14] -> [128])  # see preprocessor.py for feature layout
   combined:            concat(256 + 64 + 128) = 448 dims
   points_head:         Linear(448, 1) -> expected season pts
   value_head:          Linear(448, 1) -> fair auction $
@@ -22,7 +22,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-NUM_NUMERICAL_FEATURES = 5  # matches preprocessor.py output
+NUM_NUMERICAL_FEATURES = 14  # matches preprocessor.py 14-dim feature vector
 
 
 class PlayerValueModel(nn.Module):
