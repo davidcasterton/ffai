@@ -176,7 +176,7 @@ Best checkpoint saved to `checkpoints/value_model/best_model.pt`.
 
 ### Stage 5 — Train the PPO agent (three-phase curriculum)
 
-Training uses PufferLib's vectorized PPO with multiprocessing workers. Each episode is a full 12-team auction draft (~14 RL decisions for the agent). Phase checkpoints are loaded sequentially.
+Training uses PufferLib's vectorized PPO with multiprocessing workers. Each episode is a full 12-team auction draft (~168 total nominations). The RL agent makes one decision per bidding round it participates in — it is polled every round a nomination is in progress and it hasn't dropped out. For contested players it may make several decisions as the price climbs; for players it passes on it makes zero. Total RL decisions per episode is typically in the range of 50-200. Phase checkpoints are loaded sequentially.
 
 **Phase 1 — draft warm-up (100K steps, no season sim)**
 
