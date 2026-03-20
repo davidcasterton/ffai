@@ -57,21 +57,33 @@ def build_position_strategy(
     years: list[int] | None = None,
     data_dir: Path = None,
     league_id: str = None,
+    draft_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Build per-(position, year) strategic signal DataFrame.
+
+    Args:
+        draft_df: pre-loaded (and optionally normalized) combined draft DataFrame.
+                  When provided, skips disk loading. Must contain columns:
+                  bid_amount, position, total_points, projected_points, team_name, year.
     """
-    if data_dir is None or league_id is None:
-        _dir, _id = _default_espn_data_dir_and_id()
-        data_dir = data_dir or _dir
-        league_id = league_id or _id
-    years = years or ALL_SEASONS
     records = []
 
-    for year in years:
-        df = _load_year(year, data_dir, league_id)
-        if df is None:
-            continue
+    if draft_df is not None:
+        year_groups = [(year, grp) for year, grp in draft_df.groupby("year")]
+    else:
+        if data_dir is None or league_id is None:
+            _dir, _id = _default_espn_data_dir_and_id()
+            data_dir = data_dir or _dir
+            league_id = league_id or _id
+        years = years or ALL_SEASONS
+        year_groups = []
+        for year in years:
+            df = _load_year(year, data_dir, league_id)
+            if df is not None:
+                year_groups.append((year, df))
+
+    for year, df in year_groups:
 
         league_total_bid = df["bid_amount"].sum()
         if league_total_bid == 0:

@@ -120,7 +120,9 @@ def build_manager_tendencies(
                 row[f"bid_per_proj_pt_{pos.lower()}"] = np.nan
 
         row["high_bid_rate"] = float((grp["bid_amount"] > 30).mean())
-        row["dollar_one_rate"] = float((grp["bid_amount"] == 1).mean())
+        # Use < 1.5 threshold to catch near-minimum bids after $200 normalization
+        # (a $1 bid in a $1000 league normalizes to $0.20, so == 1 would miss it)
+        row["dollar_one_rate"] = float((grp["bid_amount"] < 1.5).mean())
 
         # Recent 3-season budget shares (for temporal weighting)
         if "year" in grp.columns:

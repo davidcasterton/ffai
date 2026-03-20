@@ -68,6 +68,7 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
     def __init__(
         self,
         year: int = 2024,
+        years: Optional[list[int]] = None,
         budget: int = 200,
         enable_season_sim: bool = False,
         season_sim_interval: int = 10,
@@ -76,6 +77,8 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
         seed=None,
     ):
         self.year = year
+        self.years = years or [year]
+        self.current_year = year
         self.budget = budget
         self.enable_season_sim = enable_season_sim
         self.season_sim_interval = season_sim_interval
@@ -85,6 +88,7 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
         self._episode_count = 0
         self._sim = None
         self._gen = None
+        self._rng = np.random.default_rng(seed)
 
         # PufferEnv requires these set BEFORE super().__init__()
         self.num_agents = 1
@@ -101,17 +105,17 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
     # Simulator construction
     # ------------------------------------------------------------------
 
-    def _make_simulator(self) -> AuctionDraftSimulator:
+    def _make_simulator(self, year: int) -> AuctionDraftSimulator:
         """
         Create a new AuctionDraftSimulator, reusing cached ESPN data so that
         disk reads happen only once per worker process.
         """
-        draft_df, stats_df, weekly_df, predraft_df, settings = _SimDataCache.get(self.year)
+        draft_df, stats_df, weekly_df, predraft_df, settings = _SimDataCache.get(year)
 
         # Create simulator without triggering its own data load by bypassing
         # __init__ and manually setting attributes.
         sim = AuctionDraftSimulator.__new__(AuctionDraftSimulator)
-        sim.year = self.year
+        sim.year = year
         sim.budget = self.budget
         sim.rl_team_name = "Team 1"
         sim.rl_model = None
@@ -172,7 +176,8 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
 
     def _start_episode(self) -> np.ndarray:
         """Create new simulator + generator, prime to first RL decision."""
-        self._sim = self._make_simulator()
+        self.current_year = int(self._rng.choice(self.years))
+        self._sim = self._make_simulator(self.current_year)
         self._sim._step_reward = 0.0
         self._gen = self._sim.draft_steps()
 
@@ -193,7 +198,7 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
             current_player=player,
             current_bid=current_bid,
             feature_store=feature_store,
-            year=self.year,
+            year=self.current_year,
         ).numpy()
 
     # ------------------------------------------------------------------
@@ -261,7 +266,7 @@ class AuctionDraftEnv(pufferlib.PufferEnv):
             draft_results = self._sim.get_draft_results()
             season_sim = SeasonSimulator(
                 draft_results=draft_results["teams"],
-                year=self.year,
+                year=self.current_year,
             )
             season_sim.simulate_season()
             standings = season_sim.get_standings()  # sorted list of (team, wins)

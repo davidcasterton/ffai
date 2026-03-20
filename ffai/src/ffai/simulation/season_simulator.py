@@ -25,6 +25,38 @@ class SeasonSimulator:
         self.schedule = self.generate_season_schedule()
         self.weekly_results = {}
 
+        # Build bye week map: {player_id_str: bye_week_number}
+        self._bye_week_map: dict = self._build_bye_week_map()
+
+    def _build_bye_week_map(self) -> dict:
+        """Return {player_id_str: bye_week} for all players inferred from weekly_df.
+
+        A player's bye week is the single missing week in [1, 17] where they have
+        no entry in weekly_df — inferred as their team having no game that week.
+        Only players with exactly one missing week are assigned a bye.
+        """
+        all_weeks = set(range(1, 18))
+        bye_map: dict = {}
+        if self.weekly_df is None or self.weekly_df.empty:
+            return bye_map
+        for pid, grp in self.weekly_df.groupby("player_id"):
+            played_weeks = set(grp["week"].astype(int).tolist())
+            missing = all_weeks - played_weeks
+            if len(missing) == 1:
+                bye_map[str(pid)] = int(min(missing))
+        return bye_map
+
+    def _simulate_injuries(self, players: list, week: int, team_name: str) -> list:
+        """Stochastically remove injured players for a given week.
+
+        Each player has a 3% chance of being unavailable due to injury.
+        Seed is deterministic per (team_name, week, year) for reproducibility.
+        Expected ~0.03 × 17 × 15 ≈ 7-8 player-weeks lost per team per season.
+        """
+        seed = abs(hash((team_name, week, self.year))) % (2 ** 32)
+        rng = np.random.default_rng(seed=seed)
+        return [p for p in players if rng.random() > 0.03]
+
     def generate_season_schedule(self):
         """Generate a 17-week schedule where each team plays others fairly"""
         teams = list(self.draft_results.keys())
@@ -81,7 +113,12 @@ class SeasonSimulator:
             })
 
     def optimize_weekly_roster(self, team_name: str, week: int) -> dict:
-        """Optimize weekly roster based on projected points for the given week"""
+        """Optimize weekly roster based on projected points for the given week.
+
+        Applies two availability filters before roster optimization:
+        1. Bye week: players whose team has no game this week are unavailable.
+        2. Injuries: players are stochastically removed (p=0.03 per player per week).
+        """
         # Create copy of roster to modify
         roster = copy.deepcopy(self.draft_results[team_name]["roster"])
 
@@ -93,12 +130,23 @@ class SeasonSimulator:
                     (self.weekly_df['player_id'] == player['player_id'])
                 ]
                 if not player_stats.empty:
-                    player['projected_points'] = player_stats['projected_points'].iloc[0]
+                    player['projected_points'] = float(player_stats['projected_points'].iloc[0])
                 else:
                     player['projected_points'] = 0
 
-        # Sort players by projected points for this week
-        available_players = [p for p in roster.values() if p is not None]
+        # Build available pool: non-None players only
+        all_players = [p for p in roster.values() if p is not None]
+
+        # Filter out bye-week players (truly unavailable — no game this week)
+        available_players = [
+            p for p in all_players
+            if self._bye_week_map.get(str(p['player_id'])) != week
+        ]
+
+        # Apply stochastic injury simulation
+        available_players = self._simulate_injuries(available_players, week, team_name)
+
+        # Sort by projected points (descending) for greedy lineup optimization
         available_players.sort(key=lambda x: x.get('projected_points', 0), reverse=True)
 
         # Clear roster slots while preserving structure

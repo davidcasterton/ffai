@@ -51,12 +51,14 @@ ffai/
 ├── scripts/
 │   ├── collect_data.py         # Stage 1: download ESPN draft/stats data
 │   ├── fetch_nfl_data.py       # Stage 2: download nflverse parquets
-│   ├── build_features.py       # Stage 3: build processed feature CSVs
+│   ├── sanity_check_data.py    # Stage 2b: detect non-$200 budgets, write budget_by_year.csv
+│   ├── build_features.py       # Stage 3: build processed feature CSVs (with bid normalization)
 │   ├── analyze_strategy.py     # exploratory: position ROI, manager tendencies, projection bias
 │   ├── train_value_model.py    # Stage 4: train supervised value model
 │   ├── train_puffer.py         # Stage 5: PufferLib PPO curriculum training (phases 1-4)
 │   ├── train_bc_reference.py   # Stage 5b (optional): train BC reference model for self-play
 │   ├── train.py                # End-to-end launcher: chains all phases in sequence
+│   ├── check_smoke.py          # Fast smoke test: import/init/step/draft check (~2s)
 │   ├── simulate_draft.py       # post-training: full draft simulation with transcript output
 │   ├── advisory_draft.py       # live draft advisory mode
 │   └── autonomous_draft.py     # autonomous ESPN draft room control
@@ -93,7 +95,7 @@ ffai/
     │   └── replay_buffer.py     # GAE rollout buffer (legacy)
     ├── simulation/
     │   ├── auction_draft_simulator.py  # 12-team auction draft engine + draft_steps() generator
-    │   └── season_simulator.py         # 17-week season simulator
+    │   └── season_simulator.py         # 17-week season simulator (bye weeks + injury model)
     └── interfaces/
         ├── live_draft_reader.py  # polls ESPN REST API during live drafts
         ├── advisory.py           # terminal UI showing recommendations
@@ -149,13 +151,25 @@ Downloads draft results, player stats, pre-draft values, and weekly scoring from
 
 Downloads 6 nflverse datasets (player stats, rosters, snap counts, draft picks, player ID crosswalk) as parquet files to `ffai/src/ffai/data/nflverse/`. These are tracked in git LFS so teammates get them automatically on clone.
 
+### Stage 2b — (Recommended) Sanity-check draft data
+
+```bash
+.venv/bin/python ffai/scripts/sanity_check_data.py --years 2009-2024
+```
+
+Reads all `draft_results_{id}_{year}.csv` files and checks for non-$200 auction budgets. Prints a per-year table with detected budgets, bid distributions, and flags managers whose `bid_per_proj_pt` varies >3× across years. Writes `budget_by_year.csv` to the processed data directory, which `build_features.py` uses for bid normalization.
+
+Run this before `build_features.py` when using multi-year league data that may span different auction budget sizes.
+
 ### Stage 3 — Build feature CSVs
 
 ```bash
 .venv/bin/python ffai/scripts/build_features.py --years 2009-2024
 ```
 
-The `--league-id` argument defaults to the value in `config/league.yaml`. Produces 3 CSVs in `ffai/src/ffai/data/{league_name}_processed/`:
+The `--league-id` argument defaults to the value in `config/league.yaml`. Bid amounts are automatically normalized to $200-equivalent before computing any features — using `budget_by_year.csv` if available, or inline detection (median team spend > $300 → $1000 budget) otherwise. This ensures `bid_per_proj_pt` and budget-share metrics are calibrated correctly regardless of which year used which auction budget.
+
+Produces 3 CSVs in `ffai/src/ffai/data/{league_name}_processed/`:
 - `player_history_{id}.csv` — per-(player_id, year): 3yr avg points, YoY change, projection accuracy, weekly consistency
 - `manager_tendencies_{id}.csv` — per-manager: RB/WR budget shares, bid aggressiveness, $1-bid rate
 - `position_strategy_{id}.csv` — per-(position, year): ROI, projection accuracy, winning team budget shares
@@ -196,7 +210,7 @@ Training uses PufferLib's vectorized PPO with multiprocessing workers. Each epis
 # Resume from Phase 3
 .venv/bin/python ffai/scripts/train.py --from-phase 3
 
-# Quick smoke test (500 steps per phase)
+# Smoke test: fast import/init/step/draft validation (~2s, no training)
 .venv/bin/python ffai/scripts/train.py --smoke-test
 ```
 
@@ -217,7 +231,7 @@ Fast validation that the pipeline works. No season simulation — reward is draf
   --load-model-path checkpoints/puffer/phase1_final.pt
 ```
 
-Season simulator runs every 10 episodes per worker (~20% of episodes get terminal reward). Checkpoint saved to `checkpoints/puffer/phase2_final.pt`.
+Season simulator runs every 10 episodes per worker (~20% of episodes get terminal reward). The season simulator models bye weeks (players are unavailable the week their NFL team has no game) and stochastic injuries (each player has ~3% chance of missing any given week). This forces bench depth to matter — teams with no backup RBs lose points in bye weeks or when starters get injured. Checkpoint saved to `checkpoints/puffer/phase2_final.pt`.
 
 **Phase 3 — full season sim (1M steps)**
 
@@ -250,10 +264,10 @@ Opponents are drawn from a pool of past RL checkpoints (70%) mixed with heuristi
   --seed-pool-path checkpoints/bc/bc_as_policy.pt
 ```
 
-**Quick smoke test (500 steps):**
+**Quick smoke test (~2s, no training):**
 
 ```bash
-.venv/bin/python ffai/scripts/train_puffer.py --curriculum-phase 1 --total-timesteps 500
+.venv/bin/python ffai/scripts/check_smoke.py
 ```
 
 ## Usage
@@ -311,3 +325,4 @@ The browser window stays visible (`headless=False`) so you can monitor and inter
 - `plans/2026-02-18_feature-engineering-and-data-expansion.md` — nflverse integration, 72-dim state, feature store
 - `plans/2026-02-18_draft-simulation-and-opponent-modeling.md` — simulate_draft.py, per-manager opponent modeling, self-play research synthesis
 - `plans/2026-02-19_self-play-auction-draft.md` — self-play via checkpoint pool + BC reference model (Phase 4)
+- `plans/2026-02-19_data-quality-bench-value-bidding.md` — budget normalization, bye weeks + injuries, auction commitment, overbid penalty

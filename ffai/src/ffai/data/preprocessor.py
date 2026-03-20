@@ -145,6 +145,41 @@ class FantasyDataPreprocessor:
     # Core data processing
     # ------------------------------------------------------------------
 
+    def _build_numerical_unscaled(
+        self,
+        merged: pd.DataFrame,
+        year: Optional[int],
+        feature_store,
+    ) -> np.ndarray:
+        """Build unscaled 14-dim numerical feature matrix for merged rows."""
+        year_norm = float(year - 2009) / 15.0 if year else 0.0
+
+        # Extended features from FeatureStore (dims 4-13)
+        ext = np.zeros((len(merged), 10), dtype=np.float32)
+        if feature_store is not None and feature_store.loaded:
+            for i, (_, row) in enumerate(merged.iterrows()):
+                feats = feature_store.get_player_features(
+                    str(row['player_id']), year or 0, position=str(row.get('position', ''))
+                )
+                ext[i, 0] = float(feats.get('proj_ratio_3yr_avg', 0.0) or 0.0)
+                ext[i, 1] = float((feats.get('proj_bias_1yr', 0.0) or 0.0)) / 400.0
+                ext[i, 2] = float((feats.get('pts_3yr_avg', 0.0) or 0.0)) / 400.0
+                ext[i, 3] = float((feats.get('pts_1yr_val', 0.0) or 0.0)) / 400.0
+                ext[i, 4] = float(np.clip(feats.get('yoy_pct_change', 0.0) or 0.0, -1.0, 1.0))
+                ext[i, 5] = float(min(1.0, (feats.get('years_in_league', 0.0) or 0.0) / 10.0))
+                ext[i, 6] = float(feats.get('weekly_pts_cv', 0.0) or 0.0)
+                ext[i, 7] = float((feats.get('floor_pts', 0.0) or 0.0)) / 40.0
+                ext[i, 8] = float((feats.get('targets_per_game', 0.0) or 0.0)) / 10.0
+                ext[i, 9] = float(feats.get('snap_pct_1yr', 0.0) or 0.0)
+
+        return np.column_stack([
+            (merged.get('projected_points', pd.Series(0, index=merged.index)).fillna(0).values.astype(np.float32) / 400.0),
+            merged.get('adp', pd.Series(0, index=merged.index)).fillna(0).values.astype(np.float32),
+            np.full(len(merged), year_norm, dtype=np.float32),
+            merged['pos_scarcity_rank_norm'].values.astype(np.float32),
+            ext,  # dims 4-13
+        ])
+
     def process_draft_data(
         self,
         draft_df: pd.DataFrame,
@@ -216,35 +251,7 @@ class FantasyDataPreprocessor:
         # Normalize scarcity rank to [0,1]
         merged['pos_scarcity_rank_norm'] = merged['pos_scarcity_rank'] / merged.groupby('position')['pos_scarcity_rank'].transform('max').clip(lower=1)
 
-        year_norm = float(year - 2009) / 15.0 if year else 0.0
-
-        # ------------------------------------------------------------------
-        # Extended features from FeatureStore (dims 4-13)
-        # ------------------------------------------------------------------
-        ext = np.zeros((len(merged), 10), dtype=np.float32)
-        if feature_store is not None and feature_store.loaded:
-            for i, (_, row) in enumerate(merged.iterrows()):
-                feats = feature_store.get_player_features(
-                    str(row['player_id']), year or 0, position=str(row.get('position', ''))
-                )
-                ext[i, 0] = float(feats.get('proj_ratio_3yr_avg', 0.0) or 0.0)
-                ext[i, 1] = float((feats.get('proj_bias_1yr', 0.0) or 0.0)) / 400.0
-                ext[i, 2] = float((feats.get('pts_3yr_avg', 0.0) or 0.0)) / 400.0
-                ext[i, 3] = float((feats.get('pts_1yr_val', 0.0) or 0.0)) / 400.0
-                ext[i, 4] = float(np.clip(feats.get('yoy_pct_change', 0.0) or 0.0, -1.0, 1.0))
-                ext[i, 5] = float(min(1.0, (feats.get('years_in_league', 0.0) or 0.0) / 10.0))
-                ext[i, 6] = float(feats.get('weekly_pts_cv', 0.0) or 0.0)
-                ext[i, 7] = float((feats.get('floor_pts', 0.0) or 0.0)) / 40.0
-                ext[i, 8] = float((feats.get('targets_per_game', 0.0) or 0.0)) / 10.0
-                ext[i, 9] = float(feats.get('snap_pct_1yr', 0.0) or 0.0)
-
-        numerical = np.column_stack([
-            (merged.get('projected_points', pd.Series(0, index=merged.index)).fillna(0).values.astype(np.float32) / 400.0),
-            merged.get('adp', pd.Series(0, index=merged.index)).fillna(0).values.astype(np.float32),
-            np.full(len(merged), year_norm, dtype=np.float32),
-            merged['pos_scarcity_rank_norm'].values.astype(np.float32),
-            ext,  # dims 4-13
-        ])
+        numerical = self._build_numerical_unscaled(merged, year=year, feature_store=feature_store)
 
         # Fit scaler on first call
         if not hasattr(self.scaler, 'mean_') or self.scaler.mean_ is None:
@@ -282,14 +289,35 @@ class FantasyDataPreprocessor:
         self.position_encoder.fit(POSITIONS + ['UNKNOWN'])
         self._fitted = True
 
-        # Scaler is fit on first year inside process_draft_data (see line with hasattr check)
-
-        # Second pass: process each year
+        # Second pass: process each year and collect unscaled numericals
         all_results = [[], [], [], [], []]
+        numericals_unscaled: list[np.ndarray] = []
         for year, draft_df, stats_df in year_data:
-            results = self.process_draft_data(draft_df, stats_df, year=year, feature_store=feature_store)
-            for i, arr in enumerate(results):
+            result = self.process_draft_data(draft_df, stats_df, year=year, feature_store=feature_store)
+            for i, arr in enumerate(result):
                 all_results[i].append(arr)
+
+            # Rebuild merged frame quickly for consistent, full-corpus scaler fitting
+            draft_tmp = draft_df.copy()
+            stats_tmp = stats_df.copy()
+            draft_tmp['player_id'] = draft_tmp['player_id'].astype(str)
+            stats_tmp['player_id'] = stats_tmp['player_id'].astype(str)
+            merged = pd.merge(draft_tmp, stats_tmp, on='player_id', how='left')
+            merged['position'] = merged['position'].fillna('UNKNOWN')
+            merged['total_points'] = merged['total_points'].fillna(0.0)
+            merged['pos_scarcity_rank'] = merged.groupby('position')['total_points'].rank(ascending=False)
+            merged['pos_scarcity_rank_norm'] = merged['pos_scarcity_rank'] / merged.groupby('position')['pos_scarcity_rank'].transform('max').clip(lower=1)
+            numericals_unscaled.append(self._build_numerical_unscaled(merged, year=year, feature_store=feature_store))
+
+        # Fit scaler on full training corpus and re-transform all train years
+        if numericals_unscaled:
+            full_train_numerical = np.concatenate(numericals_unscaled, axis=0)
+            self.scaler.fit(full_train_numerical)
+
+            transformed = []
+            for arr in numericals_unscaled:
+                transformed.append(self.scaler.transform(arr).astype(np.float32))
+            all_results[2] = transformed
 
         return tuple(np.concatenate(arrays) for arrays in all_results)
 

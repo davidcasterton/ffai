@@ -14,6 +14,8 @@ import argparse
 import sys
 from pathlib import Path
 import logging
+import json
+from datetime import datetime, timezone
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -21,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from ffai import get_logger
 from ffai.data.espn_scraper import ESPNDraftScraper
 from ffai.data.preprocessor import FantasyDataPreprocessor
+from ffai.data.feature_store import FeatureStore
 from ffai.value_model.player_value_model import PlayerValueModel
 from ffai.value_model.value_trainer import ValueModelTrainer
 
@@ -78,6 +81,12 @@ def main():
     # Load data
     scraper = ESPNDraftScraper(config_path=args.config)
     preprocessor = FantasyDataPreprocessor()
+    feature_store = None
+    try:
+        feature_store = FeatureStore()
+        logger.info("Loaded FeatureStore for engineered training features")
+    except Exception as e:
+        logger.warning(f"FeatureStore unavailable, falling back to base features only: {e}")
 
     logger.info("Loading training data...")
     train_year_data = []
@@ -96,17 +105,21 @@ def main():
 
     # Process training data (fits encoders)
     logger.info("Processing training data...")
-    train_data = preprocessor.process_multi_year(train_year_data)
+    train_data = preprocessor.process_multi_year(train_year_data, feature_store=feature_store)
 
     # Process validation data
     logger.info(f"Loading validation data ({args.val_year})...")
     val_draft, val_stats, _, _, _ = scraper.load_or_fetch_data(args.val_year)
-    val_data = preprocessor.process_draft_data(val_draft, val_stats, year=args.val_year)
+    val_data = preprocessor.process_draft_data(
+        val_draft, val_stats, year=args.val_year, feature_store=feature_store
+    )
 
     # Process test data
     logger.info(f"Loading test data ({args.test_year})...")
     test_draft, test_stats, _, _, _ = scraper.load_or_fetch_data(args.test_year)
-    test_data = preprocessor.process_draft_data(test_draft, test_stats, year=args.test_year)
+    test_data = preprocessor.process_draft_data(
+        test_draft, test_stats, year=args.test_year, feature_store=feature_store
+    )
 
     # Save preprocessor state (for use during RL training and inference)
     args.preprocessor_dir.mkdir(parents=True, exist_ok=True)
@@ -149,6 +162,31 @@ def main():
     )
 
     logger.info(f"Best model saved to {args.checkpoint_dir / 'best_model.pt'}")
+
+    # Persist run metadata for reproducibility/debugging
+    manifest = {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "train_years": train_years,
+        "val_year": args.val_year,
+        "test_year": args.test_year,
+        "device": args.device,
+        "learning_rate": lr,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "early_stopping_patience": patience,
+        "feature_store_loaded": bool(feature_store and feature_store.loaded),
+        "num_train_samples": int(len(train_data[0])),
+        "num_val_samples": int(len(val_data[0])),
+        "num_test_samples": int(len(test_data[0])),
+        "test_metrics": {
+            "points_rmse": float(test_metrics["points_rmse"]),
+            "dollar_mae": float(test_metrics["dollar_mae"]),
+        },
+    }
+    manifest_path = args.checkpoint_dir / "run_manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    logger.info(f"Saved training manifest to {manifest_path}")
 
 
 if __name__ == "__main__":

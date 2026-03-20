@@ -23,7 +23,7 @@ Usage:
     # Skip BC reference training (faster, slightly weaker opponent init)
     .venv/bin/python ffai/scripts/train.py --skip-bc
 
-    # Smoke test: 500 steps per phase, serial backend
+    # Smoke test: fast import/init/step check (~10s, no training)
     .venv/bin/python ffai/scripts/train.py --smoke-test
 
     # Phase 4 only with specific seed
@@ -79,25 +79,38 @@ def main():
     )
     parser.add_argument(
         "--smoke-test", action="store_true",
-        help="Run only 500 timesteps per phase for fast end-to-end validation",
+        help="Run check_smoke.py (import/init/step/draft check, ~10s) instead of full training",
     )
     parser.add_argument(
         "--bc-years", type=str, default="2019-2024",
         help="Years to use for BC reference training (e.g. '2019-2024')",
     )
+    parser.add_argument(
+        "--train-years", type=str, default="2024",
+        help="Years used for RL env sampling (e.g. '2022-2024' or '2022,2023,2024')",
+    )
     args = parser.parse_args()
 
-    ts_override = ["--total-timesteps", "500"] if args.smoke_test else []
-    serial_flag = ["--serial"] if args.smoke_test else []
+    # -----------------------------------------------------------------------
+    # Smoke test: fast import/init/step check — skips full PufferLib training
+    # -----------------------------------------------------------------------
+    if args.smoke_test:
+        run(
+            [PYTHON, "ffai/scripts/check_smoke.py"],
+            "Smoke test — import/init/step/draft validation (no training)",
+        )
+        print(f"\n{'=' * 60}")
+        print("  Smoke test complete.")
+        print(f"{'=' * 60}\n")
+        return
 
     # -----------------------------------------------------------------------
     # Phase 1
     # -----------------------------------------------------------------------
     if args.from_phase <= 1:
-        if args.smoke_test or not phase_checkpoint(1).exists():
+        if not phase_checkpoint(1).exists():
             run(
-                [PYTHON, "ffai/scripts/train_puffer.py", "--curriculum-phase", "1"]
-                + ts_override + serial_flag,
+                [PYTHON, "ffai/scripts/train_puffer.py", "--curriculum-phase", "1", "--train-years", args.train_years],
                 "Phase 1 — draft warm-up (no season sim)",
             )
         else:
@@ -107,14 +120,14 @@ def main():
     # Phase 2
     # -----------------------------------------------------------------------
     if args.from_phase <= 2:
-        if args.smoke_test or not phase_checkpoint(2).exists():
+        if not phase_checkpoint(2).exists():
             run(
                 [
                     PYTHON, "ffai/scripts/train_puffer.py",
                     "--curriculum-phase", "2",
+                    "--train-years", args.train_years,
                     "--load-model-path", str(phase_checkpoint(1)),
-                ]
-                + ts_override + serial_flag,
+                ],
                 "Phase 2 — season sim introduced every 10 episodes",
             )
         else:
@@ -124,14 +137,14 @@ def main():
     # Phase 3
     # -----------------------------------------------------------------------
     if args.from_phase <= 3:
-        if args.smoke_test or not phase_checkpoint(3).exists():
+        if not phase_checkpoint(3).exists():
             run(
                 [
                     PYTHON, "ffai/scripts/train_puffer.py",
                     "--curriculum-phase", "3",
+                    "--train-years", args.train_years,
                     "--load-model-path", str(phase_checkpoint(2)),
-                ]
-                + ts_override + serial_flag,
+                ],
                 "Phase 3 — full season sim every episode",
             )
         else:
@@ -147,8 +160,7 @@ def main():
                     PYTHON, "ffai/scripts/train_bc_reference.py",
                     "--years", args.bc_years,
                     "--export-checkpoint",
-                ]
-                + (["--epochs", "5"] if args.smoke_test else []),
+                ],
                 "BC Reference Model — behavioral cloning on historical ESPN data",
             )
         else:
@@ -171,11 +183,12 @@ def main():
         cmd = [
             PYTHON, "ffai/scripts/train_puffer.py",
             "--curriculum-phase", "4",
+            "--train-years", args.train_years,
             "--load-model-path", str(phase_checkpoint(3)),
             "--seed-pool-path", str(seed_pool),
-        ] + ts_override + serial_flag
+        ]
 
-        if args.smoke_test or not phase_checkpoint(4).exists():
+        if not phase_checkpoint(4).exists():
             run(cmd, f"Phase 4 — self-play (seed: {seed_pool})")
         else:
             print(f"\n[skip] Phase 4 checkpoint exists: {phase_checkpoint(4)}")

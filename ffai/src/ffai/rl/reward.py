@@ -51,6 +51,14 @@ def mid_draft_reward(
     if not budget_safe:
         base -= 0.2
 
+    # Nonlinear overbid penalty: extra signal when bid > 2× fair value.
+    # This is a secondary guard — the primary fix is correct VORP_dollar calibration
+    # from budget-normalized training data (see build_features.py normalization).
+    # Example: $125 bid on $45 player → ratio=2.78, extra penalty=−0.078
+    overbid_ratio = bid_amount / max(fair_dollar_value, 1.0)
+    if overbid_ratio > 2.0:
+        base -= 0.1 * min(overbid_ratio - 2.0, 3.0)  # max additional penalty: -0.3
+
     return float(base)
 
 

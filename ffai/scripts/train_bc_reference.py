@@ -34,6 +34,7 @@ from ffai.data.espn_scraper import ESPNDraftScraper, load_league_config
 
 CHECKPOINT_DIR = Path("checkpoints/bc")
 BUDGET = 200.0
+BASE_POSITIONS = ["QB", "RB", "WR", "TE", "D/ST", "K"]
 
 
 # ---------------------------------------------------------------------------
@@ -82,19 +83,27 @@ def build_bc_dataset(years: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
         if "pick_number" in draft_df.columns:
             draft_df = draft_df.sort_values("pick_number")
 
-        # Track each team's remaining budget as picks are processed
-        team_budgets: dict[str, float] = {}
-        team_position_counts: dict[str, dict[str, int]] = {}
+        # Build team list by first appearance to preserve pick-order semantics
+        team_names = []
+        for t in draft_df["team_name"].astype(str).tolist():
+            if t not in team_names:
+                team_names.append(t)
+
+        # Replay state
+        team_budgets = {team: BUDGET for team in team_names}
+        team_rosters = {team: _init_roster_slots(settings) for team in team_names}
+        drafted_player_ids: set[str] = set()
+        total_picks = len(draft_df)
+        year_obs_count = 0
 
         for _, pick in draft_df.iterrows():
             team_name = str(pick.get("team_name", "unknown"))
             bid_amount = float(pick.get("bid_amount", 1))
-            position = str(pick.get("position", ""))
+            position = str(pick.get("position", "")).strip()
 
-            # Initialize team budget tracking
             if team_name not in team_budgets:
                 team_budgets[team_name] = BUDGET
-                team_position_counts[team_name] = {}
+                team_rosters[team_name] = _init_roster_slots(settings)
 
             remaining_budget = team_budgets[team_name]
             if remaining_budget <= 0:
@@ -103,15 +112,17 @@ def build_bc_dataset(years: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
             # bid_fraction = fraction of budget at time of pick
             bid_fraction = float(np.clip(bid_amount / remaining_budget, 0.01, 0.99))
 
-            # Build a minimal state dict for this pick
-            # We use simplified state since we don't have full sim state for historical data
-            state_dict = _build_minimal_state(
+            # Build replayed state for this pick from historical progression.
+            state_dict = _build_replay_state(
                 team_name=team_name,
-                remaining_budget=remaining_budget,
-                bid_amount=bid_amount,
-                pick_row=pick,
+                team_budgets=team_budgets,
+                team_rosters=team_rosters,
+                settings=settings,
                 draft_df=draft_df,
                 predraft_df=predraft_df,
+                drafted_player_ids=drafted_player_ids,
+                pick_index=year_obs_count,
+                total_picks=total_picks,
             )
 
             # Build current player dict
@@ -129,14 +140,14 @@ def build_bc_dataset(years: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
 
             all_obs.append(obs)
             all_targets.append(bid_fraction)
+            year_obs_count += 1
 
             # Update budget
             team_budgets[team_name] = max(0.0, remaining_budget - bid_amount)
-            team_position_counts[team_name][position] = (
-                team_position_counts[team_name].get(position, 0) + 1
-            )
+            drafted_player_ids.add(player_id)
+            _assign_player_to_roster(team_rosters[team_name], position)
 
-        print(f"    Extracted {len(all_obs)} picks from {year}")
+        print(f"    Extracted {year_obs_count} picks from {year}")
 
     if not all_obs:
         raise ValueError("No valid picks extracted. Check data availability.")
@@ -148,43 +159,172 @@ def build_bc_dataset(years: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     return obs_tensor, target_tensor
 
 
-def _build_minimal_state(
+def _init_roster_slots(settings: dict) -> dict[str, str | None]:
+    """Create an empty, simulator-like roster structure from league settings."""
+    roster = {
+        "QB": None,
+        "RB 1": None,
+        "RB 2": None,
+        "WR 1": None,
+        "WR 2": None,
+        "TE": None,
+        "FLEX": None,
+        "D/ST": None,
+    }
+    if settings.get("position_slot_counts", {}).get("K"):
+        roster["K"] = None
+
+    bench_n = int(settings.get("position_slot_counts", {}).get("BE", 0) or 0)
+    for i in range(bench_n):
+        roster[f"BENCH {i+1}"] = None
+    return roster
+
+
+def _assign_player_to_roster(roster: dict[str, str | None], position: str) -> None:
+    """Assign drafted position into roster using simulator-like slot rules."""
+    pos = position
+
+    def first_empty(prefix: str) -> str | None:
+        for k, v in roster.items():
+            if k.startswith(prefix) and v is None:
+                return k
+        return None
+
+    def assign_bench() -> None:
+        bench_slot = first_empty("BENCH")
+        if bench_slot:
+            roster[bench_slot] = pos
+
+    if pos == "QB":
+        if roster.get("QB") is None:
+            roster["QB"] = pos
+        else:
+            assign_bench()
+    elif pos == "RB":
+        if roster.get("RB 1") is None:
+            roster["RB 1"] = pos
+        elif roster.get("RB 2") is None:
+            roster["RB 2"] = pos
+        elif roster.get("FLEX") is None:
+            roster["FLEX"] = pos
+        else:
+            assign_bench()
+    elif pos == "WR":
+        if roster.get("WR 1") is None:
+            roster["WR 1"] = pos
+        elif roster.get("WR 2") is None:
+            roster["WR 2"] = pos
+        elif roster.get("FLEX") is None:
+            roster["FLEX"] = pos
+        else:
+            assign_bench()
+    elif pos == "TE":
+        if roster.get("TE") is None:
+            roster["TE"] = pos
+        elif roster.get("FLEX") is None:
+            roster["FLEX"] = pos
+        else:
+            assign_bench()
+    elif pos == "D/ST":
+        if roster.get("D/ST") is None:
+            roster["D/ST"] = pos
+        else:
+            assign_bench()
+    elif pos == "K":
+        if roster.get("K") is None:
+            roster["K"] = pos
+        else:
+            assign_bench()
+    else:
+        assign_bench()
+
+
+def _position_needs_from_roster(roster: dict[str, str | None]) -> dict[str, int]:
+    """Approximate remaining positional needs in a simulator-compatible format."""
+    rb_count = sum(1 for p in roster.values() if p == "RB")
+    wr_count = sum(1 for p in roster.values() if p == "WR")
+    te_count = sum(1 for p in roster.values() if p == "TE")
+
+    needs = {
+        "QB": 1 if roster.get("QB") is None else 0,
+        "RB": int(roster.get("RB 1") is None) + int(roster.get("RB 2") is None),
+        "WR": int(roster.get("WR 1") is None) + int(roster.get("WR 2") is None),
+        "TE": 1 if roster.get("TE") is None else 0,
+        "D/ST": 1 if roster.get("D/ST") is None else 0,
+        "K": 1 if ("K" in roster and roster.get("K") is None) else 0,
+    }
+    # Flex pressure (RB/WR/TE only)
+    if roster.get("FLEX") is None:
+        if rb_count < 3:
+            needs["RB"] += 1
+        if wr_count < 3:
+            needs["WR"] += 1
+        if te_count < 2:
+            needs["TE"] += 1
+    return needs
+
+
+def _build_replay_state(
     team_name: str,
-    remaining_budget: float,
-    bid_amount: float,
-    pick_row,
+    team_budgets: dict[str, float],
+    team_rosters: dict[str, dict[str, str | None]],
+    settings: dict,
     draft_df,
     predraft_df,
+    drafted_player_ids: set[str],
+    pick_index: int,
+    total_picks: int,
 ) -> dict:
-    """Build a minimal state dict compatible with build_state() for a historical pick."""
-    # Estimate position needs from how many roster slots remain
-    remaining_slots = max(1, int(remaining_budget))  # rough proxy
+    """Build a replayed historical state dict compatible with build_state()."""
+    remaining_budget = float(team_budgets[team_name])
+    roster = team_rosters[team_name]
+    position_needs = _position_needs_from_roster(roster)
 
-    # Position needs: use standard roster as simplified approximation
-    position_needs = {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "D/ST": 1, "K": 1}
+    # Remaining player pool from predraft table (exclude already drafted)
+    remaining_pool = predraft_df
+    if remaining_pool is not None and "player_id" in remaining_pool.columns:
+        remaining_pool = remaining_pool[
+            ~remaining_pool["player_id"].astype(str).isin(drafted_player_ids)
+        ]
 
-    # Position values from predraft data
+    # Position values from remaining pool
     position_values = {}
-    for pos in ["QB", "RB", "WR", "TE", "D/ST", "K"]:
-        pos_players = predraft_df[predraft_df["position"] == pos] if predraft_df is not None else None
+    for pos in BASE_POSITIONS:
+        pos_players = remaining_pool[remaining_pool["position"] == pos] if remaining_pool is not None else None
         if pos_players is not None and len(pos_players) > 0:
             position_values[pos] = {
                 "avg_value": float(pos_players.get("auction_value", 0).mean() if "auction_value" in pos_players.columns else 0),
                 "avg_points": float(pos_players.get("projected_points", 0).mean() if "projected_points" in pos_players.columns else 0),
             }
 
+    # Approximate scarcity: total league needs vs remaining pool by position
+    total_needs_by_pos = {p: 0 for p in BASE_POSITIONS}
+    for t in team_rosters:
+        n = _position_needs_from_roster(team_rosters[t])
+        for p in BASE_POSITIONS:
+            total_needs_by_pos[p] += int(n.get(p, 0))
+    position_scarcity = {}
+    for pos in BASE_POSITIONS:
+        available = 0
+        if remaining_pool is not None:
+            available = int((remaining_pool["position"] == pos).sum())
+        position_scarcity[pos] = max(0.0, float(total_needs_by_pos[pos] - available))
+
+    opp_budgets = [float(team_budgets[t]) for t in team_budgets if t != team_name]
+    remaining_slots = max(1, int(sum(position_needs.values())))
+
     return {
         "rl_team_budget": remaining_budget,
-        "opponent_budgets": [BUDGET * 0.7] * 11,  # simplified approximation
-        "draft_turn": 0,
-        "teams": [f"Team {i+1}" for i in range(12)],
+        "opponent_budgets": opp_budgets,
+        "draft_turn": int(pick_index),
+        "teams": list(team_budgets.keys()),
         "predicted_points_per_slot": {},
         "position_needs": position_needs,
         "position_counts": {},
-        "position_scarcity": {pos: 0.0 for pos in ["QB", "RB", "WR", "TE", "D/ST", "K"]},
+        "position_scarcity": position_scarcity,
         "position_values": position_values,
         "remaining_budget_per_need": remaining_budget / max(1, remaining_slots),
-        "draft_progress": 0.5,  # simplified
+        "draft_progress": float(pick_index) / max(1, total_picks),
         "total_team_points": 0.0,
         "opponent_tendencies": [],
     }

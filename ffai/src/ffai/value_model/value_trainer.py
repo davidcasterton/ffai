@@ -134,7 +134,7 @@ class ValueModelTrainer:
 
         best_val_loss = float('inf')
         patience_counter = 0
-        history = {'train_loss': [], 'val_loss': [], 'val_pts_rmse': [], 'val_dollar_mae': []}
+        history = {'train_loss': [], 'val_loss': [], 'val_pts_rmse': [], 'val_dollar_rmse': []}
 
         for epoch in range(self.num_epochs):
             train_loss, _, _ = self._run_epoch(train_loader, train=True)
@@ -143,19 +143,19 @@ class ValueModelTrainer:
             self.scheduler.step(val_loss)
 
             val_pts_rmse = val_pts_loss ** 0.5
-            val_dollar_mae = val_dollar_loss ** 0.5
+            val_dollar_rmse = val_dollar_loss ** 0.5
 
             history['train_loss'].append(train_loss)
             history['val_loss'].append(val_loss)
             history['val_pts_rmse'].append(val_pts_rmse)
-            history['val_dollar_mae'].append(val_dollar_mae)
+            history['val_dollar_rmse'].append(val_dollar_rmse)
 
             logger.info(
                 f"Epoch {epoch+1:3d}/{self.num_epochs} | "
                 f"train_loss={train_loss:.4f} | "
                 f"val_loss={val_loss:.4f} | "
                 f"pts_RMSE={val_pts_rmse:.2f} | "
-                f"dollar_MAE=${val_dollar_mae:.2f}"
+                f"dollar_RMSE=${val_dollar_rmse:.2f}"
             )
 
             if val_loss < best_val_loss:

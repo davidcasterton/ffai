@@ -187,13 +187,18 @@ def load_config(phase: int, total_timesteps_override: int | None = None, self_pl
 # Environment factory
 # ---------------------------------------------------------------------------
 
-def make_env_creator(phase: int, opponent_pool: OpponentPool | None = None):
+def make_env_creator(
+    phase: int,
+    train_years: list[int],
+    opponent_pool: OpponentPool | None = None,
+):
     """Return an env_creator callable suitable for pufferlib.vector."""
     phase_cfg = PHASE_CONFIGS[phase]
 
     def env_creator(buf=None, seed=None):
         return AuctionDraftEnv(
             year=2024,
+            years=train_years,
             enable_season_sim=phase_cfg["enable_season_sim"],
             season_sim_interval=phase_cfg["season_sim_interval"],
             opponent_pool=opponent_pool,
@@ -246,8 +251,19 @@ def train(args):
     phase_cfg = PHASE_CONFIGS[phase]
     num_envs = args.num_envs if args.num_envs is not None else phase_cfg["num_envs"]
 
+    # Parse train years once; each episode samples one year.
+    train_years: list[int]
+    if "-" in args.train_years:
+        s, e = args.train_years.split("-")
+        train_years = list(range(int(s), int(e) + 1))
+    else:
+        train_years = [int(y.strip()) for y in args.train_years.split(",") if y.strip()]
+
     print(f"\n=== Phase {phase}: {phase_cfg['description']} ===")
-    print(f"    num_envs={num_envs}, total_timesteps={args.total_timesteps or phase_cfg['total_timesteps']}")
+    print(
+        f"    num_envs={num_envs}, total_timesteps={args.total_timesteps or phase_cfg['total_timesteps']}, "
+        f"train_years={train_years}"
+    )
 
     config = load_config(
         phase,
@@ -260,7 +276,7 @@ def train(args):
     opponent_pool = _build_opponent_pool(phase_cfg, config, args)
 
     # Build vecenv (Serial for phase 1 smoke tests, Multiprocessing otherwise)
-    env_creator = make_env_creator(phase, opponent_pool=opponent_pool)
+    env_creator = make_env_creator(phase, train_years=train_years, opponent_pool=opponent_pool)
     env_creators = [env_creator] * num_envs
     env_args = [[] for _ in range(num_envs)]
     env_kwargs = [{} for _ in range(num_envs)]
@@ -359,6 +375,10 @@ def main():
     parser.add_argument(
         "--serial", action="store_true",
         help="Force Serial backend even with multiple envs (useful for debugging)",
+    )
+    parser.add_argument(
+        "--train-years", type=str, default="2024",
+        help="Years used for env sampling per episode (e.g. '2022-2024' or '2022,2023,2024')",
     )
     args = parser.parse_args()
     train(args)

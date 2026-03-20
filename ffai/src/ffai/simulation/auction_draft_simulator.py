@@ -23,6 +23,7 @@ try:
     _FEATURE_STORE_AVAILABLE = True
 except ImportError:
     _FEATURE_STORE_AVAILABLE = False
+from ffai.rl.reward import mid_draft_reward
 
 logger = get_logger(__name__)
 
@@ -237,6 +238,17 @@ class AuctionDraftSimulator:
                 current_winner: str = nominating_team_name
                 active_bidders: set = set(self.teams.keys())
 
+                # Cache heuristic opponents' reservation prices once per nomination.
+                # Real ascending auctions: each participant commits to a max price and
+                # bids +$1 until the price exceeds their reservation. Re-sampling noise
+                # each round causes spurious dropouts and non-monotonic bidding behavior.
+                _cached_max_bids: dict = {}
+                for _t in self.teams:
+                    if _t == self.rl_team_name:
+                        continue
+                    if not (self._opponent_policies and self._opponent_policies.get(_t) is not None):
+                        _cached_max_bids[_t] = self._opponent_max_bid(_t, nominated_player, 0)
+
                 while len(active_bidders) > 1:
                     highest_bid: int = current_bid
                     highest_bidder = None
@@ -257,7 +269,11 @@ class AuctionDraftSimulator:
                                 self.teams[team_name]["current_budget"]
                             )
                         else:
-                            max_bid = self._opponent_max_bid(team_name, nominated_player, current_bid)
+                            # Use cached reservation price for heuristic opponents;
+                            # checkpoint policies are re-polled (state-dependent bids)
+                            max_bid = _cached_max_bids.get(team_name) or self._opponent_max_bid(
+                                team_name, nominated_player, current_bid
+                            )
 
                         if max_bid > current_bid:
                             highest_bid = current_bid + 1
@@ -334,6 +350,14 @@ class AuctionDraftSimulator:
                 current_winner: str = nominating_team_name
                 active_bidders: set = set(self.teams.keys())
 
+                # Cache heuristic opponents' reservation prices once per nomination.
+                _cached_max_bids_gen: dict = {}
+                for _t in self.teams:
+                    if _t == self.rl_team_name:
+                        continue
+                    if not (self._opponent_policies and self._opponent_policies.get(_t) is not None):
+                        _cached_max_bids_gen[_t] = self._opponent_max_bid(_t, nominated_player, 0)
+
                 while len(active_bidders) > 1:
                     highest_bid: int = current_bid
                     highest_bidder = None
@@ -352,7 +376,11 @@ class AuctionDraftSimulator:
                             max_bid = yield (state, nominated_player, current_bid)
                             self._step_reward = 0.0
                         else:
-                            max_bid = self._opponent_max_bid(team_name, nominated_player, current_bid)
+                            # Use cached reservation price for heuristic opponents;
+                            # checkpoint policies are re-polled (state-dependent bids)
+                            max_bid = _cached_max_bids_gen.get(team_name) or self._opponent_max_bid(
+                                team_name, nominated_player, current_bid
+                            )
 
                         if max_bid > current_bid:
                             highest_bid = current_bid + 1
@@ -433,8 +461,7 @@ class AuctionDraftSimulator:
 
     def _calculate_mid_draft_reward(self, player: dict, bid_amount: int) -> float:
         """
-        Calculate mid-draft reward for RL team using the reward module convention.
-        Returns a small scalar for logging; actual PPO rewards are computed externally.
+        Calculate mid-draft reward for RL team using shared reward module logic.
         """
         fair_value = float(player.get('VORP_dollar', player.get('auction_value', 1)))
         pos = player.get('position', '')
@@ -445,12 +472,15 @@ class AuctionDraftSimulator:
         min_needed = self.get_min_budget_needed_to_complete_roster(self.rl_team_name)
         budget_safe = remaining_budget >= min_needed
 
-        base = (fair_value - bid_amount) / 200.0
-        if position_needed:
-            base += 0.1
-        if not budget_safe:
-            base -= 0.2
-        return float(base)
+        return float(
+            mid_draft_reward(
+                fair_dollar_value=fair_value,
+                bid_amount=float(bid_amount),
+                position_needed=position_needed,
+                budget_safe=budget_safe,
+                budget_max=float(self.budget),
+            )
+        )
 
     # ------------------------------------------------------------------
     # Roster management
@@ -702,14 +732,23 @@ class AuctionDraftSimulator:
                 [(t, self.teams[t]["current_budget"]) for t in self.teams if t != self.rl_team_name],
                 key=lambda x: x[1], reverse=True
             )
-            # We don't have team→manager_id mapping in the sim, so use league averages
-            # for all opponents (same values, but still encodes league tendencies)
-            avg_tendency = {}
-            for col in ["rb_budget_share", "wr_budget_share", "high_bid_rate",
-                        "dollar_one_rate", "bid_per_proj_pt_rb", "bid_per_proj_pt_wr"]:
-                vals = [float(row.get(col, 0) or 0) for row in self._manager_tendencies.values()]
-                avg_tendency[col] = float(np.mean(vals)) if vals else 0.0
-            opponent_tendencies = [avg_tendency] * min(3, len(opp_budgets_sorted))
+            cols = [
+                "rb_budget_share", "wr_budget_share", "high_bid_rate",
+                "dollar_one_rate", "bid_per_proj_pt_rb", "bid_per_proj_pt_wr",
+            ]
+            league_avg = {
+                col: float(np.mean([float(row.get(col, 0) or 0) for row in self._manager_tendencies.values()]))
+                for col in cols
+            }
+            for team_name, _budget in opp_budgets_sorted[:3]:
+                manager_id = self._team_manager_map.get(team_name)
+                if manager_id and manager_id in self._manager_tendencies:
+                    row = self._manager_tendencies[manager_id]
+                    opponent_tendencies.append({
+                        col: float(row.get(col, league_avg[col]) or league_avg[col]) for col in cols
+                    })
+                else:
+                    opponent_tendencies.append(dict(league_avg))
 
         return {
             'rl_team_budget': rl_team["current_budget"],
@@ -784,12 +823,23 @@ class AuctionDraftSimulator:
                 [(t, self.teams[t]["current_budget"]) for t in self.teams if t != team_name],
                 key=lambda x: x[1], reverse=True
             )
-            avg_tendency = {}
-            for col in ["rb_budget_share", "wr_budget_share", "high_bid_rate",
-                        "dollar_one_rate", "bid_per_proj_pt_rb", "bid_per_proj_pt_wr"]:
-                vals = [float(row.get(col, 0) or 0) for row in self._manager_tendencies.values()]
-                avg_tendency[col] = float(np.mean(vals)) if vals else 0.0
-            opponent_tendencies = [avg_tendency] * min(3, len(opp_budgets_sorted))
+            cols = [
+                "rb_budget_share", "wr_budget_share", "high_bid_rate",
+                "dollar_one_rate", "bid_per_proj_pt_rb", "bid_per_proj_pt_wr",
+            ]
+            league_avg = {
+                col: float(np.mean([float(row.get(col, 0) or 0) for row in self._manager_tendencies.values()]))
+                for col in cols
+            }
+            for opp_team, _budget in opp_budgets_sorted[:3]:
+                manager_id = self._team_manager_map.get(opp_team)
+                if manager_id and manager_id in self._manager_tendencies:
+                    row = self._manager_tendencies[manager_id]
+                    opponent_tendencies.append({
+                        col: float(row.get(col, league_avg[col]) or league_avg[col]) for col in cols
+                    })
+                else:
+                    opponent_tendencies.append(dict(league_avg))
 
         return {
             'rl_team_budget': team["current_budget"],
